@@ -1,4 +1,5 @@
 import cv2
+import os
 
 
 def get_frames(video_path, n=8):
@@ -19,6 +20,18 @@ def get_frames(video_path, n=8):
     return frames
 
 
+def save_frames(frames, outdir="frames_out"):
+    if not os.path.exists(outdir):
+        os.makedirs(outdir)
+    paths = []
+    for i, f in enumerate(frames):
+        p = os.path.join(outdir, "frame_%d.jpg" % i)
+        cv2.imwrite(p, f)
+        paths.append(p)
+    return paths
+
+
 if __name__ == "__main__":
     fs = get_frames("test.mp4")
     print("got", len(fs), "frames")
+    print(save_frames(fs))
