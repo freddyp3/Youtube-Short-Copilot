@@ -6,7 +6,7 @@ from frames import get_frames, save_frames
 genai.configure(api_key=os.environ["GEMINI_KEY"])
 
 PICK_PROMPT = """these are frames from a brawl stars youtube short.
-which one would make the best thumbnail? reply with ONLY the number."""
+which one would make the best thumbnail? it should grab attention and make people click. reply with ONLY the number."""
 
 
 def pick_frame(video_path, n=8):
