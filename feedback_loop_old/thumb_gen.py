@@ -16,8 +16,13 @@ def pick_frame(video_path, n=8):
     model = genai.GenerativeModel("gemini-2.0-flash")
     imgs = [Image.open(p) for p in paths]
     resp = model.generate_content([PICK_PROMPT] + imgs)
-    choice = int(resp.text.strip())
-    return paths[choice]
+    try:
+        choice = int(resp.text.strip())
+        return paths[choice]
+    except Exception as e:
+        print("gemini said something weird:", resp.text)
+        print(e)
+        return paths[0]
 
 
 if __name__ == "__main__":
