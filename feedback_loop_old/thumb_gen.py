@@ -5,8 +5,9 @@ from frames import get_frames, save_frames
 
 genai.configure(api_key=os.environ["GEMINI_KEY"])
 
-PICK_PROMPT = """these are frames from a brawl stars youtube short.
-which one would make the best thumbnail? it should grab attention and make people click. reply with ONLY the number."""
+PICK_PROMPT = """these are frames from a brawl stars youtube short, numbered 0 to {n}.
+which one would work best as the thumbnail? i want people to click on it.
+reply with ONLY the number."""
 
 
 def pick_frame(video_path, n=8):
@@ -15,7 +16,7 @@ def pick_frame(video_path, n=8):
     paths = save_frames(frames)
     model = genai.GenerativeModel("gemini-2.0-flash")
     imgs = [Image.open(p) for p in paths]
-    resp = model.generate_content([PICK_PROMPT] + imgs)
+    resp = model.generate_content([PICK_PROMPT.format(n=n - 1)] + imgs)
     try:
         choice = int(resp.text.strip())
         if choice < 0 or choice >= len(paths):
