@@ -10,7 +10,7 @@ which one would work best as the thumbnail? i want people to click on it.
 reply with ONLY the number."""
 
 
-def pick_frame(video_path, n=8):
+def pick_frame(video_path, n=10):
     """let gemini look at the frames and choose one"""
     frames = get_frames(video_path, n)
     paths = save_frames(frames)
