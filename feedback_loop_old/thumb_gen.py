@@ -36,6 +36,7 @@ def gen_thumbnail(extra="", out="thumb_gen.png"):
     model = genai.GenerativeModel("gemini-2.0-flash-preview-image-generation")
     resp = model.generate_content(
         GEN_PROMPT.format(extra=extra),
+        generation_config={"response_modalities": ["IMAGE", "TEXT"]},
     )
     for part in resp.parts:
         if getattr(part, "inline_data", None):
