@@ -13,4 +13,15 @@ def get_features(path):
     contrast = gray.std()
     saturation = hsv[:, :, 1].mean()
 
-    return [brightness, contrast, saturation]
+    edges = cv2.Canny(gray, 100, 200)
+    edge_pct = (edges > 0).mean()
+
+    # colourful-ness formula i found on stackoverflow
+    b, g, r = cv2.split(img.astype("float"))
+    rg = r - g
+    yb = 0.5 * (r + g) - b
+    colour = np.sqrt(rg.std() ** 2 + yb.std() ** 2) + 0.3 * np.sqrt(
+        rg.mean() ** 2 + yb.mean() ** 2
+    )
+
+    return [brightness, contrast, saturation, edge_pct, colour]
