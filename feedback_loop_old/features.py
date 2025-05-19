@@ -1,6 +1,10 @@
 import cv2
 import numpy as np
 
+face_cascade = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+)
+
 
 def get_features(path):
     """thumbnail -> numbers the model can learn from"""
@@ -24,4 +28,6 @@ def get_features(path):
         rg.mean() ** 2 + yb.mean() ** 2
     )
 
-    return [brightness, contrast, saturation, edge_pct, colour]
+    faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+
+    return [brightness, contrast, saturation, edge_pct, colour, len(faces)]
