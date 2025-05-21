@@ -9,7 +9,7 @@ face_cascade = cv2.CascadeClassifier(
 def get_features(path):
     """thumbnail -> numbers the model can learn from"""
     img = cv2.imread(path)
-    img = cv2.resize(img, (640, 360))
+    img = cv2.resize(img, (320, 180))
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
