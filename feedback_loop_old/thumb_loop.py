@@ -14,7 +14,8 @@ def score(path):
 
 def make_thumbnail(video_path, tries=5):
     """keep going until the model thinks the thumbnail is good enough"""
-    best_score = 0
+    best = None
+    best_score = -1
     for i in range(tries):
         cand = gen_thumbnail(out="cand_%d.png" % i)
         if cand is None:
@@ -22,9 +23,10 @@ def make_thumbnail(video_path, tries=5):
         s = score(cand)
         print("try", i + 1, "->", cand, "score", s)
         if s > best_score:
+            best = cand
             best_score = s
-            return cand
-    return None
+    print("using", best)
+    return best
 
 
 if __name__ == "__main__":
