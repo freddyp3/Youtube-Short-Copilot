@@ -16,8 +16,9 @@ def make_thumbnail(video_path, tries=5):
     """keep going until the model thinks the thumbnail is good enough"""
     best = None
     best_score = -1
+    feedback = ""
     for i in range(tries):
-        cand = gen_thumbnail(out="cand_%d.png" % i)
+        cand = gen_thumbnail(feedback, out="cand_%d.png" % i)
         if cand is None:
             cand = pick_frame(video_path)
         s = score(cand)
@@ -25,6 +26,11 @@ def make_thumbnail(video_path, tries=5):
         if s > best_score:
             best = cand
             best_score = s
+        if s < ACCEPT_SCORE:
+            feedback = (
+                "the last attempt was predicted to get low engagement. "
+                "make it brighter and more exciting."
+            )
     print("using", best)
     return best
 
