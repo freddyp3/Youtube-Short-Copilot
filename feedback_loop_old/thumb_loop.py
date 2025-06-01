@@ -1,3 +1,4 @@
+import os
 import xgboost as xgb
 from thumb_gen import pick_frame, gen_thumbnail
 from features import get_features
@@ -19,7 +20,7 @@ def make_thumbnail(video_path, tries=5):
     feedback = ""
     for i in range(tries):
         cand = gen_thumbnail(feedback, out="cand_%d.png" % i)
-        if cand is None:
+        if cand is None or not os.path.exists(cand):
             cand = pick_frame(video_path)
         s = score(cand)
         print("try", i + 1, "->", cand, "score", s)
