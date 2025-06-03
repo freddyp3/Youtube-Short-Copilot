@@ -13,7 +13,7 @@ def score(path):
     return model.predict([get_features(path)])[0]
 
 
-def make_thumbnail(video_path, tries=5):
+def make_thumbnail(video_path, tries=8):
     """keep going until the model thinks the thumbnail is good enough"""
     best = None
     best_score = -1
