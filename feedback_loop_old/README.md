@@ -13,3 +13,6 @@ too low it goes back and tries again.
 
 model kind of works on like 8 thumbnails. needs way more data before the
 acceptance score means anything.
+
+accept score is set way too low rn, its basically accepting anything.
+scores all cluster near zero on the tiny training set.
