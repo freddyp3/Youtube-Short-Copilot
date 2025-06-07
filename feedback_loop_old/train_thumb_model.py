@@ -8,7 +8,7 @@ print("training on", len(df), "thumbnails")
 X = [get_features(p) for p in df["file"]]
 y = df["engagement_rate"]
 
-model = xgb.XGBRegressor(n_estimators=100, max_depth=3)
+model = xgb.XGBRegressor(n_estimators=200, max_depth=4)
 model.fit(X, y)
 model.save_model("thumb_model.json")
 print("saved thumb_model.json")
