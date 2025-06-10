@@ -35,7 +35,7 @@ def make_thumbnail(video_path, tries=5):
             "the last attempt was predicted to get low engagement. "
             "make it brighter and more exciting, bigger text, more contrast."
         )
-    print("gave up, using", best)
+    print("gave up after", tries, "tries, using", best)
     return best
 
 
