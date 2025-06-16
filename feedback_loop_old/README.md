@@ -18,3 +18,5 @@ accept score is set way too low rn, its basically accepting anything.
 scores all cluster near zero on the tiny training set.
 
 TODO: the accept threshold is basically meaningless with 8 rows.
+
+maybe same trick for captions, claude writes them.
