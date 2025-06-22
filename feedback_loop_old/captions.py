@@ -28,11 +28,20 @@ def caption_features(text):
     return [
         len(text),
         text.count("!"),
-        text.count("😂") + text.count("🔥") + text.count("💀"),
+        sum(1 for c in text if ord(c) > 10000),  # emoji-ish
         int("?" in text),
         int(any(w in text.lower() for w in ["free", "insane", "crazy", "new", "win"])),
     ]
 
 
+def make_caption(desc, tries=5):
+    """same acceptance loop as thumbnails, claude writes, xgboost judges"""
+    for i in range(tries):
+        cap = write_caption(desc)
+        s = model.predict([caption_features(cap)])[0]
+        print("try", i + 1, "score", s, "->", cap)
+    return cap
+
+
 if __name__ == "__main__":
-    print(write_caption("a 1v3 clutch in knockout"))
+    print(make_caption("a 1v3 clutch in knockout"))
