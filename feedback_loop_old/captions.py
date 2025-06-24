@@ -11,14 +11,16 @@ PROMPT = """write a caption for a brawl stars youtube short.
 
 the video is about: {desc}
 
-reply with ONLY the caption text, nothing else"""
+reply with ONLY the caption text, nothing else
+
+{feedback}"""
 
 
-def write_caption(desc):
+def write_caption(desc, feedback=""):
     r = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=100,
-        messages=[{"role": "user", "content": PROMPT.format(desc=desc)}],
+        messages=[{"role": "user", "content": PROMPT.format(desc=desc, feedback=feedback)}],
     )
     return r.content[0].text.strip()
 
@@ -36,11 +38,19 @@ def caption_features(text):
 
 def make_caption(desc, tries=5):
     """same acceptance loop as thumbnails, claude writes, xgboost judges"""
+    best = None
+    best_score = -1
+    feedback = ""
     for i in range(tries):
-        cap = write_caption(desc)
+        cap = write_caption(desc, feedback)
         s = model.predict([caption_features(cap)])[0]
         print("try", i + 1, "score", s, "->", cap)
-    return cap
+        if s > best_score:
+            best = cap
+            best_score = s
+        feedback = "the last caption was predicted to flop, go more hype. "
+    print("gave up, using best:", best)
+    return best
 
 
 if __name__ == "__main__":
