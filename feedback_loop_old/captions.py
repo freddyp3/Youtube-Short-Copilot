@@ -11,9 +11,14 @@ PROMPT = """write a caption for a brawl stars youtube short.
 
 the video is about: {desc}
 
-reply with ONLY the caption text, nothing else
+rules:
+- under 100 characters
+- punchy, a bit of hype is fine
+- emojis ok but dont overdo it
+- no hashtag spam
+- {feedback}
 
-{feedback}"""
+reply with ONLY the caption text, nothing else"""
 
 
 def write_caption(desc, feedback=""):
