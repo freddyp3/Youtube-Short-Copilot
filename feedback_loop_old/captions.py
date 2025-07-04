@@ -4,9 +4,6 @@ import xgboost as xgb
 
 client = anthropic.Anthropic(api_key=os.environ["CLAUDE_KEY"])
 
-model = xgb.XGBRegressor()
-model.load_model("caption_model.json")
-
 PROMPT = """write a caption for a brawl stars youtube short.
 
 the video is about: {desc}
@@ -20,14 +17,10 @@ rules:
 
 reply with ONLY the caption text, nothing else"""
 
+model = xgb.XGBRegressor()
+model.load_model("caption_model.json")
 
-def write_caption(desc, feedback=""):
-    r = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=100,
-        messages=[{"role": "user", "content": PROMPT.format(desc=desc, feedback=feedback)}],
-    )
-    return r.content[0].text.strip()
+ACCEPT_SCORE = 0.06
 
 
 def caption_features(text):
@@ -39,6 +32,15 @@ def caption_features(text):
         int("?" in text),
         int(any(w in text.lower() for w in ["free", "insane", "crazy", "new", "win"])),
     ]
+
+
+def write_caption(desc, feedback=""):
+    r = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=100,
+        messages=[{"role": "user", "content": PROMPT.format(desc=desc, feedback=feedback)}],
+    )
+    return r.content[0].text.strip()
 
 
 def make_caption(desc, tries=5):
@@ -53,6 +55,9 @@ def make_caption(desc, tries=5):
         if s > best_score:
             best = cap
             best_score = s
+        if s >= ACCEPT_SCORE:
+            print("accepted:", cap)
+            return cap
         feedback = "the last caption was predicted to flop, go more hype. "
     print("gave up, using best:", best)
     return best
