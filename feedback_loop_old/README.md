@@ -10,3 +10,4 @@ writes them.
 - `features.py` + `train_thumb_model.py` = the xgboost judge
 - `thumb_loop.py` = generate -> score -> retry until accepted
 - `captions.py` + `train_caption_model.py` = same loop, claude writes
+- `collect_data.py` = grabs public brawl stars shorts + stats for training data
