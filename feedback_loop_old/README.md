@@ -11,3 +11,5 @@ writes them.
 - `thumb_loop.py` = generate -> score -> retry until accepted
 - `captions.py` + `train_caption_model.py` = same loop, claude writes
 - `collect_data.py` = grabs public brawl stars shorts + stats for training data
+
+need like 100x more rows before any of this means anything.
