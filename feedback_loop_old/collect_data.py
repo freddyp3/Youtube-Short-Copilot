@@ -28,10 +28,25 @@ def search_shorts(q="brawl stars shorts", max_results=25):
     return [v["id"]["videoId"] for v in r["items"]]
 
 
+def stats(video_ids):
+    r = requests.get(
+        "https://www.googleapis.com/youtube/v3/videos",
+        params={
+            "key": KEY,
+            "part": "statistics,snippet",
+            "id": ",".join(video_ids),
+        },
+    ).json()
+    return r["items"]
+
+
 def main():
     ids = search_shorts()
     print("got", len(ids), "video ids")
-    print(ids[:5])
+    for v in stats(ids):
+        views = int(v["statistics"].get("viewCount", 0))
+        likes = int(v["statistics"].get("likeCount", 0))
+        print(v["id"], "views", views, "likes", likes)
 
 
 if __name__ == "__main__":
