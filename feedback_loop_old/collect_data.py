@@ -43,10 +43,16 @@ def stats(video_ids):
 def main():
     ids = search_shorts()
     print("got", len(ids), "video ids")
+    rows = []
     for v in stats(ids):
         views = int(v["statistics"].get("viewCount", 0))
         likes = int(v["statistics"].get("likeCount", 0))
-        print(v["id"], "views", views, "likes", likes)
+        if views < 1000:
+            continue  # too small, engagement number would be noise
+        caption = v["snippet"]["title"]
+        thumb = "https://i.ytimg.com/vi/%s/hqdefault.jpg" % v["id"]
+        rows.append([v["id"], caption, thumb, likes / views])
+    print("usable rows:", len(rows))
 
 
 if __name__ == "__main__":
