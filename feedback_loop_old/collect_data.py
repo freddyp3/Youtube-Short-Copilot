@@ -4,6 +4,7 @@ pulls recent brawl stars shorts from the public youtube data api. public
 data only, dont need oauth for this.
 """
 import os
+import csv
 import requests
 from dotenv import load_dotenv
 
@@ -42,7 +43,6 @@ def stats(video_ids):
 
 def main():
     ids = search_shorts()
-    print("got", len(ids), "video ids")
     rows = []
     for v in stats(ids):
         views = int(v["statistics"].get("viewCount", 0))
@@ -52,7 +52,12 @@ def main():
         caption = v["snippet"]["title"]
         thumb = "https://i.ytimg.com/vi/%s/hqdefault.jpg" % v["id"]
         rows.append([v["id"], caption, thumb, likes / views])
-    print("usable rows:", len(rows))
+
+    with open("data/collected.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["video_id", "caption", "thumb_url", "engagement_rate"])
+        w.writerows(rows)
+    print("saved", len(rows), "rows")
 
 
 if __name__ == "__main__":
