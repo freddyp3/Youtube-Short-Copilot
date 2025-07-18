@@ -1,7 +1,8 @@
 """script i used to build the training csvs.
 
-pulls recent brawl stars shorts from the public youtube data api. public
-data only, dont need oauth for this.
+pulls recent brawl stars shorts from the public youtube data api, saves the
+thumbnail + the caption, and works out engagement as likes/views from the
+public stats. public data only, dont need oauth for this.
 """
 import os
 import csv
