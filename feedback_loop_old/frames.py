@@ -2,7 +2,7 @@ import cv2
 import os
 
 
-def get_frames(video_path, n=8):
+def get_frames(video_path, n=10):
     """grab n frames spread out through the video"""
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -11,7 +11,7 @@ def get_frames(video_path, n=8):
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     frames = []
     for i in range(n):
-        pos = int(total * (i + 0.5) / n)
+        pos = int(total * (i + 1) / (n + 1))
         cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
         ok, frame = cap.read()
         if ok:
