@@ -24,7 +24,7 @@ def make_thumbnail(video_path, tries=5):
         if cand is None:
             cand = pick_frame(video_path)
         s = score(cand)
-        print("try", i + 1, "->", cand, "score", s)
+        print("try", i + 1, "->", cand, "score", round(s, 4))
         if s > best_score:
             best = cand
             best_score = s
@@ -35,7 +35,7 @@ def make_thumbnail(video_path, tries=5):
             "the last attempt was predicted to get low engagement. "
             "make it brighter and more exciting, bigger text, more contrast."
         )
-    print("gave up after", tries, "tries, using", best)
+    print("gave up, using", best)
     return best
 
 
