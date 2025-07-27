@@ -24,7 +24,7 @@ def make_thumbnail(video_path, tries=5):
         if cand is None:
             cand = pick_frame(video_path)
         s = score(cand)
-        print("try", i + 1, "->", cand, "score", round(s, 4))
+        print("try", i + 1, "->", cand, "score", s)
         if s > best_score:
             best = cand
             best_score = s

@@ -48,4 +48,4 @@ def gen_thumbnail(extra="", out="thumb_gen.png"):
 
 
 if __name__ == "__main__":
-    print(pick_frame("test.mp4"))
+    print(gen_thumbnail())

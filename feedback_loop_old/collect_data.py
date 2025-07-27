@@ -58,7 +58,7 @@ def main():
         w = csv.writer(f)
         w.writerow(["video_id", "caption", "thumb_url", "engagement_rate"])
         w.writerows(rows)
-    print("saved", len(rows), "rows to data/collected.csv")
+    print("saved", len(rows), "rows")
 
 
 if __name__ == "__main__":
