@@ -13,3 +13,8 @@ writes them.
 - `collect_data.py` = grabs public brawl stars shorts + stats for training data
 
 need like 100x more rows before any of this means anything.
+
+## ideas
+
+- evaluate on my own channel once i have enough uploads
+- caption a/b test for real
