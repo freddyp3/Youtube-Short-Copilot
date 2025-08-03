@@ -17,7 +17,7 @@ def get_features(path):
     contrast = gray.std()
     saturation = hsv[:, :, 1].mean()
 
-    edges = cv2.Canny(gray, 80, 160)
+    edges = cv2.Canny(gray, 100, 200)
     edge_pct = (edges > 0).mean()
 
     # colourful-ness formula i found on stackoverflow
