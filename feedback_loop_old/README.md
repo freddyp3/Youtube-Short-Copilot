@@ -18,3 +18,8 @@ need like 100x more rows before any of this means anything.
 
 - evaluate on my own channel once i have enough uploads
 - caption a/b test for real
+
+## UPDATE AUG
+
+the models are basically guessing at this data size, so the "acceptance
+criteria" doesnt actually mean anything yet.
