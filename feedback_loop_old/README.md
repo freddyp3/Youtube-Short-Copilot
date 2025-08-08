@@ -23,3 +23,4 @@ need like 100x more rows before any of this means anything.
 
 the models are basically guessing at this data size, so the "acceptance
 criteria" doesnt actually mean anything yet.
+the loop idea is still good, it just needs real engagement data behind it.
