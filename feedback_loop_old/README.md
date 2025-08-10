@@ -10,17 +10,10 @@ writes them.
 - `features.py` + `train_thumb_model.py` = the xgboost judge
 - `thumb_loop.py` = generate -> score -> retry until accepted
 - `captions.py` + `train_caption_model.py` = same loop, claude writes
-- `collect_data.py` = grabs public brawl stars shorts + stats for training data
-
-need like 100x more rows before any of this means anything.
-
-## ideas
-
-- evaluate on my own channel once i have enough uploads
-- caption a/b test for real
 
 ## UPDATE AUG
 
-the models are basically guessing at this data size, so the "acceptance
-criteria" doesnt actually mean anything yet.
-the loop idea is still good, it just needs real engagement data behind it.
+parking this for now. the models are basically guessing at this data size,
+so the "acceptance criteria" doesnt actually mean anything yet. keeping the
+code around because the loop idea is still good, it just needs real
+engagement data behind it.
