@@ -6,10 +6,14 @@ import http.client
 import json
 import logging
 import random
+import re
 import socket
 import ssl
 import time
+from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, TypeVar
 
 from googleapiclient.errors import HttpError
@@ -31,6 +35,18 @@ TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
     ssl.SSLError,
     http.client.HTTPException,
 )
+
+# YouTube Data API v3 cost per call, from
+# https://developers.google.com/youtube/v3/determine_quota_cost (all list calls we use cost 1).
+# Every request, including invalid ones and retries, is charged.
+DATA_API_COSTS: dict[str, int] = {
+    "channels.list": 1,
+    "playlistItems.list": 1,
+    "videos.list": 1,
+    "commentThreads.list": 1,
+    "comments.list": 1,
+}
+
 
 def chunked(items: Sequence[T], size: int) -> Iterator[list[T]]:
     """Yield consecutive slices of ``items`` with at most ``size`` elements."""
@@ -138,3 +154,115 @@ def execute_with_retry(
             )
             sleep(delay)
             attempt += 1
+
+
+@dataclass
+class CallStats:
+    """Counts request attempts per API method and derives Data API quota units."""
+
+    calls: Counter[str] = field(default_factory=Counter)
+
+    def record(self, api: str, method: str) -> None:
+        """Count one attempt (retries count too; Google charges for them)."""
+        self.calls[f"{api}:{method}"] += 1
+
+    def _for(self, api: str) -> dict[str, int]:
+        prefix = f"{api}:"
+        return {k[len(prefix) :]: v for k, v in self.calls.items() if k.startswith(prefix)}
+
+    @property
+    def data_api_units(self) -> int:
+        """Estimated YouTube Data API v3 quota units consumed."""
+        return sum(DATA_API_COSTS.get(m, 1) * n for m, n in self._for("youtube").items())
+
+    def summary(self) -> dict[str, Any]:
+        """JSON-serialisable summary for the manifest."""
+        return {
+            "data_api_units_used": self.data_api_units,
+            "data_api_calls": self._for("youtube"),
+            "analytics_api_calls": sum(self._for("analytics").values()),
+            "reporting_api_calls": self._for("reporting"),
+            "note": (
+                "Data API units per https://developers.google.com/youtube/v3/determine_quota_cost "
+                "(default 10,000/day). Analytics API: 1 unit per request, separate quota."
+            ),
+        }
+
+
+_UNSAFE = re.compile(r"[^A-Za-z0-9._=@-]+")
+
+
+class RawStore:
+    """Writes untouched API responses as pretty JSON under a root folder (no-op if root is None)."""
+
+    def __init__(self, root: Path | None) -> None:
+        self.root = root
+        self.files_written = 0
+
+    def path_for(self, name: str) -> Path | None:
+        """Resolve a slash-separated name into a sanitised path under the root."""
+        if self.root is None:
+            return None
+        parts = [_UNSAFE.sub("_", p) for p in name.split("/") if p]
+        return self.root.joinpath(*parts)
+
+    def save(self, name: str, payload: Any) -> Path | None:
+        """Serialise ``payload`` to ``<root>/<name>``; returns the path written."""
+        path = self.path_for(name)
+        if path is None:
+            return None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str), "utf-8")
+        self.files_written += 1
+        return path
+
+
+class ApiCaller:
+    """Executes googleapiclient requests with retries, counts calls and stores raw responses."""
+
+    def __init__(
+        self,
+        raw: RawStore | None = None,
+        stats: CallStats | None = None,
+        *,
+        max_retries: int = 5,
+        base_delay: float = 1.0,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.raw = raw or RawStore(None)
+        self.stats = stats or CallStats()
+        self.max_retries = max_retries
+        self.base_delay = base_delay
+        self.sleep = sleep
+
+    def execute(self, api: str, method: str, request: Any, raw_name: str | None = None) -> Any:
+        """Run ``request``; save the JSON response (or the error body) under ``raw_name``."""
+        try:
+            response = execute_with_retry(
+                request,
+                max_retries=self.max_retries,
+                base_delay=self.base_delay,
+                sleep=self.sleep,
+                on_attempt=lambda: self.stats.record(api, method),
+            )
+        except HttpError as err:
+            if raw_name:
+                stem = raw_name[:-5] if raw_name.endswith(".json") else raw_name
+                self.raw.save(f"{stem}.error.json", {**describe_error(err), "body": _error_payload(err)})
+            raise
+        if raw_name:
+            self.raw.save(raw_name, response)
+        return response
+
+
+def paginate_tokens(fetch_page: Callable[[str | None, int], dict[str, Any]]) -> Iterable[dict[str, Any]]:
+    """Yield pages from a pageToken-style list call until ``nextPageToken`` runs out."""
+    token: str | None = None
+    page = 0
+    while True:
+        page += 1
+        response = fetch_page(token, page)
+        yield response
+        token = response.get("nextPageToken")
+        if not token:
+            return
