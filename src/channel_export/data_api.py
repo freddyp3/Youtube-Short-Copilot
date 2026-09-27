@@ -47,6 +47,7 @@ VIDEO_PARTS: tuple[str, ...] = (
 
 VIDEOS_PER_CALL = 50  # videos.list accepts at most 50 ids per request
 PLAYLIST_PAGE_SIZE = 50
+COMMENTS_PAGE_SIZE = 100
 
 
 def get_my_channel(youtube: Any, caller: ApiCaller) -> dict[str, Any]:
@@ -172,3 +173,102 @@ def get_videos(
         videos.extend(response.get("items") or [])
         log.info("videos.list: %d/%d videos", len(videos), len(video_ids))
     return videos, dropped
+
+
+def list_comment_threads(youtube: Any, caller: ApiCaller, video_id: str) -> list[dict[str, Any]]:
+    """All published top-level comment threads (with inline replies) for one video."""
+    threads: list[dict[str, Any]] = []
+    token: str | None = None
+    page = 0
+    while True:
+        page += 1
+        kwargs: dict[str, Any] = {
+            "part": "snippet,replies",
+            "videoId": video_id,
+            "maxResults": COMMENTS_PAGE_SIZE,
+            "textFormat": "plainText",
+        }
+        if token:
+            kwargs["pageToken"] = token
+        response = caller.execute(
+            "youtube",
+            "commentThreads.list",
+            youtube.commentThreads().list(**kwargs),
+            f"data_api/commentThreads.list/{video_id}/page_{page:04d}.json",
+        )
+        threads.extend(response.get("items") or [])
+        token = response.get("nextPageToken")
+        if not token:
+            return threads
+
+
+def list_replies(youtube: Any, caller: ApiCaller, parent_id: str) -> list[dict[str, Any]]:
+    """All replies to one top-level comment via comments.list(parentId=...)."""
+    replies: list[dict[str, Any]] = []
+    token: str | None = None
+    page = 0
+    while True:
+        page += 1
+        kwargs: dict[str, Any] = {
+            "part": "id,snippet",
+            "parentId": parent_id,
+            "maxResults": COMMENTS_PAGE_SIZE,
+            "textFormat": "plainText",
+        }
+        if token:
+            kwargs["pageToken"] = token
+        response = caller.execute(
+            "youtube",
+            "comments.list",
+            youtube.comments().list(**kwargs),
+            f"data_api/comments.list/{parent_id}/page_{page:04d}.json",
+        )
+        replies.extend(response.get("items") or [])
+        token = response.get("nextPageToken")
+        if not token:
+            return replies
+
+
+def fetch_comments(
+    youtube: Any,
+    caller: ApiCaller,
+    video_ids: Sequence[str],
+    errors: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Comment threads for every video as ``{"videoId", "thread", "replies"}`` records.
+
+    When a thread's ``totalReplyCount`` is larger than the replies embedded in the thread
+    (commentThreads only inlines a few), the full reply list is fetched with comments.list.
+    """
+    errors = errors if errors is not None else []
+    records: list[dict[str, Any]] = []
+    for n, video_id in enumerate(video_ids, 1):
+        try:
+            threads = list_comment_threads(youtube, caller, video_id)
+        except HttpError as err:
+            reason = error_reason(err)
+            if reason in ("commentsDisabled", "videoNotFound"):
+                log.info("Comments unavailable for %s (%s)", video_id, reason)
+                continue
+            errors.append({"step": "comments", "video_id": video_id, **describe_error(err)})
+            if is_quota_exhausted(err):
+                log.error("Data API quota exhausted; stopping comment export.")
+                break
+            log.error("commentThreads.list failed for %s: %s", video_id, describe_error(err)["message"])
+            continue
+        for thread in threads:
+            snippet = thread.get("snippet") or {}
+            inline = list((thread.get("replies") or {}).get("comments") or [])
+            total = int(snippet.get("totalReplyCount") or 0)
+            replies = inline
+            if total > len(inline):
+                parent_id = (snippet.get("topLevelComment") or {}).get("id") or thread.get("id")
+                try:
+                    replies = list_replies(youtube, caller, parent_id)
+                except HttpError as err:
+                    errors.append({"step": "comment_replies", "parent_id": parent_id, **describe_error(err)})
+                    log.error("comments.list failed for %s: %s", parent_id, describe_error(err)["message"])
+            records.append({"videoId": video_id, "thread": thread, "replies": replies})
+        if n % 10 == 0 or n == len(video_ids):
+            log.info("Comments: %d/%d videos done (%d threads so far)", n, len(video_ids), len(records))
+    return records
