@@ -14,6 +14,7 @@ https://developers.google.com/youtube/analytics/channel_reports (updated 2026-09
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -54,6 +55,13 @@ SUBSCRIBED_STATUS_METRICS: tuple[str, ...] = VIEW_METRICS + (
 )
 # Traffic source, traffic source detail, device/OS and playback location reports.
 INSIGHT_METRICS: tuple[str, ...] = ("engagedViews", "views", "estimatedMinutesWatched")
+RETENTION_METRICS: tuple[str, ...] = (
+    "audienceWatchRatio",
+    "relativeRetentionPerformance",
+    "startedWatching",
+    "stoppedWatching",
+    "totalSegmentImpressions",
+)
 # Need the yt-analytics-monetary.readonly scope and a YPP channel (403 otherwise).
 MONETARY_METRICS: tuple[str, ...] = (
     "estimatedRevenue",
@@ -83,9 +91,12 @@ TRAFFIC_DETAIL_TYPES: tuple[str, ...] = (
     "WATCH_WITH",
 )
 
+TOP_VIDEOS_MAX_RESULTS = 200  # "Top videos" reports: maxResults <= 200 and sort is required
 DETAIL_MAX_RESULTS = 25  # traffic source detail: maxResults <= 25 and sort is required
 CITY_MAX_RESULTS = 250  # user activity by city: maxResults <= 250 and sort is required
 CITY_DATA_START = date(2022, 1, 1)  # city data exists from 2022-01-01
+TRAFFIC_VIDEO_DAY_LIMIT = 50_000  # traffic source: (#videos x #days) must not exceed 50,000
+MAX_FILTER_IDS = 200  # docs allow 500 ids per filter; 200 keeps request URLs short
 
 
 @dataclass(frozen=True)
@@ -238,3 +249,113 @@ def channel_report_specs(monetary: bool = False) -> list[ReportSpec]:
             ReportSpec(name="ad_types", metrics=AD_TYPE_METRICS, dimensions=("adType",), table="ad_types")
         )
     return specs
+
+
+def video_lifetime_spec() -> ReportSpec:
+    """Per-video totals plus content type ("Top videos" report, paginated 200 rows at a time)."""
+    return ReportSpec(
+        name="video_lifetime",
+        metrics=BASIC_METRICS,
+        dimensions=("video", "creatorContentType"),
+        sort="-views",
+        max_results=TOP_VIDEOS_MAX_RESULTS,
+        paginate=True,
+        table="video_metrics",
+    )
+
+
+def video_revenue_spec() -> ReportSpec:
+    """Per-video monetary totals (only with --monetary)."""
+    return ReportSpec(
+        name="video_revenue",
+        metrics=MONETARY_METRICS,
+        dimensions=("video",),
+        sort="-estimatedRevenue",
+        max_results=TOP_VIDEOS_MAX_RESULTS,
+        paginate=True,
+        table="video_revenue",
+    )
+
+
+def video_daily_spec(video_id: str) -> ReportSpec:
+    """Daily time series for one video ("Time-based" report with a video filter)."""
+    return ReportSpec(
+        name="video_daily",
+        metrics=BASIC_METRICS,
+        dimensions=("day",),
+        filters=f"video=={video_id}",
+        table="video_daily",
+    )
+
+
+def retention_spec(video_id: str) -> ReportSpec:
+    """Audience retention curve (100 points) for one video; only single-video filters are allowed."""
+    return ReportSpec(
+        name="retention",
+        metrics=RETENTION_METRICS,
+        dimensions=("elapsedVideoTimeRatio",),
+        filters=f"video=={video_id}",
+        table="retention",
+    )
+
+
+def traffic_batch_spec(video_ids: Sequence[str]) -> ReportSpec:
+    """Traffic sources for several videos in one call (multi-value video filter + video dimension)."""
+    return ReportSpec(
+        name="traffic_sources",
+        metrics=INSIGHT_METRICS,
+        dimensions=("video", "insightTrafficSourceType"),
+        filters="video==" + ",".join(video_ids),
+        table="traffic_sources",
+    )
+
+
+def traffic_single_spec(video_id: str) -> ReportSpec:
+    """Traffic sources for one video (fallback if a batched call is rejected)."""
+    return ReportSpec(
+        name="traffic_sources",
+        metrics=INSIGHT_METRICS,
+        dimensions=("insightTrafficSourceType",),
+        filters=f"video=={video_id}",
+        table="traffic_sources",
+    )
+
+
+def traffic_detail_spec(video_id: str, source_type: str) -> ReportSpec:
+    """Top 25 referrers (search terms, hashtags, sounds, ...) of one traffic source type for one video."""
+    return ReportSpec(
+        name="video_traffic_detail",
+        metrics=INSIGHT_METRICS,
+        dimensions=("insightTrafficSourceDetail",),
+        filters=f"video=={video_id};insightTrafficSourceType=={source_type}",
+        sort="-views",
+        max_results=DETAIL_MAX_RESULTS,
+        table="traffic_source_details",
+    )
+
+
+def plan_traffic_batches(
+    videos: Sequence[tuple[str, date]],
+    end: date,
+    limit: int = TRAFFIC_VIDEO_DAY_LIMIT,
+    max_ids: int = MAX_FILTER_IDS,
+) -> list[tuple[list[str], date]]:
+    """Group (video_id, start_date) pairs so each batch keeps #videos x #days <= ``limit``.
+
+    Each batch is queried from its oldest start date, so newest videos are grouped together.
+    """
+    batches: list[tuple[list[str], date]] = []
+    current: list[str] = []
+    current_start: date | None = None
+    for video_id, start in sorted(videos, key=lambda v: v[1], reverse=True):
+        start = min(start, end)
+        candidate_start = start if current_start is None else min(current_start, start)
+        days = (end - candidate_start).days + 1
+        if current and ((len(current) + 1) * days > limit or len(current) >= max_ids):
+            batches.append((current, current_start))  # type: ignore[arg-type]
+            current, candidate_start = [], start
+        current.append(video_id)
+        current_start = candidate_start
+    if current:
+        batches.append((current, current_start))  # type: ignore[arg-type]
+    return batches
