@@ -11,10 +11,13 @@ from unittest.mock import MagicMock
 import httplib2
 import pandas as pd
 import pytest
+from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
 from src.channel_export import analytics, auth, data_api, reporting
+from src.channel_export.cli import build_parser
 from src.channel_export.common import ApiCaller, CallStats, RawStore, execute_with_retry
+from src.channel_export.export import Exporter, ExportOptions
 from src.channel_export.flatten import (
     comments_to_df,
     content_types_by_video,
@@ -302,3 +305,276 @@ def test_videos_to_df_labels_shorts() -> None:
     assert df["duration_seconds"].tolist() == [45.0, 3723.0, 0.0]
     assert json.loads(df.loc[0, "snippet.tags"]) == ["x", "y"]
     assert parse_iso_duration("bogus") is None
+
+
+# ---------------------------------------------------------------- end-to-end export with a failing report
+
+
+def _analytics_response(params: dict[str, Any]) -> dict[str, Any]:
+    dims = params["dimensions"].split(",") if params.get("dimensions") else []
+    metrics = params["metrics"].split(",")
+    filters = dict(f.split("==", 1) for f in params.get("filters", "").split(";") if f)
+    videos = filters.get("video", "v1,v2").split(",")
+    samples = {
+        "day": ["2026-09-01"],
+        "creatorContentType": ["SHORTS"],
+        "ageGroup": ["age18-24"],
+        "gender": ["male"],
+        "country": ["US"],
+        "city": ["London"],
+        "deviceType": ["MOBILE"],
+        "operatingSystem": ["ANDROID"],
+        "subscribedStatus": ["UNSUBSCRIBED"],
+        "sharingService": ["WHATSAPP"],
+        "insightPlaybackLocationType": ["BROWSE"],
+        "insightTrafficSourceType": ["SHORTS", "YT_SEARCH"],
+        "insightTrafficSourceDetail": ["brawl stars"],
+        "elapsedVideoTimeRatio": [0.01, 0.02],
+        "video": videos,
+    }
+    rows: list[list[Any]] = [[]]
+    for dim in dims:
+        rows = [row + [value] for row in rows for value in samples[dim]]
+    rows = [row + [10] * len(metrics) for row in rows]
+    headers = [
+        {
+            "name": d,
+            "columnType": "DIMENSION",
+            "dataType": "FLOAT" if d == "elapsedVideoTimeRatio" else "STRING",
+        }
+        for d in dims
+    ]
+    headers += [{"name": m, "columnType": "METRIC", "dataType": "INTEGER"} for m in metrics]
+    return {"kind": "youtubeAnalytics#resultTable", "columnHeaders": headers, "rows": rows}
+
+
+def _fake_youtube() -> MagicMock:
+    youtube = MagicMock()
+    channel = {
+        "id": "UC123",
+        "snippet": {"title": "alfie", "publishedAt": "2024-01-01T00:00:00Z"},
+        "contentDetails": {"relatedPlaylists": {"uploads": "UU123"}},
+        "statistics": {"viewCount": "100"},
+    }
+    youtube.channels.return_value.list.return_value = FakeRequest({"items": [channel]})
+    items = [
+        {"contentDetails": {"videoId": "v1", "videoPublishedAt": "2026-09-01T10:00:00Z"}},
+        {"contentDetails": {"videoId": "v2", "videoPublishedAt": "2026-08-01T10:00:00Z"}},
+    ]
+    youtube.playlistItems.return_value.list.return_value = FakeRequest({"items": items})
+    youtube.videos.return_value.list.side_effect = lambda **kw: FakeRequest(
+        {
+            "items": [
+                {
+                    "id": v,
+                    "snippet": {"title": v, "publishedAt": "2026-08-01T10:00:00Z"},
+                    "contentDetails": {"duration": "PT30S"},
+                }
+                for v in kw["id"].split(",")
+            ]
+        }
+    )
+
+    def threads(**kw: Any) -> FakeRequest:
+        if kw["videoId"] == "v2":
+            return FakeRequest(errors=[http_error(403, "commentsDisabled", "disabled")])
+        return FakeRequest(
+            {
+                "items": [
+                    {"id": "t1", "snippet": {"topLevelComment": _comment("t1", "gg"), "totalReplyCount": 0}}
+                ]
+            }
+        )
+
+    youtube.commentThreads.return_value.list.side_effect = threads
+    return youtube
+
+
+def test_one_failing_report_does_not_stop_the_export(tmp_path: Path) -> None:
+    service = MagicMock()
+    queries: list[dict[str, Any]] = []
+
+    def query(**params: Any) -> FakeRequest:
+        queries.append(params)
+        if params.get("dimensions") == "ageGroup,gender":
+            return FakeRequest(errors=[http_error(400)])
+        return FakeRequest(_analytics_response(params))
+
+    service.reports.return_value.query.side_effect = query
+    options = ExportOptions(out_base=tmp_path, until=date(2026, 9, 25))
+    exporter = Exporter(
+        _fake_youtube(), service, MagicMock(), options, run_dir=tmp_path / "run", sleep=lambda _s: None
+    )
+    manifest = exporter.run()
+    run = tmp_path / "run"
+
+    failed = [e for e in manifest["errors"] if e["step"] == "analytics:demographics"]
+    assert (
+        len(failed) == 1
+        and failed[0]["query"]["dimensions"] == "ageGroup,gender"
+        and failed[0]["http_status"] == 400
+    )
+    assert manifest["error_count"] == 1
+    assert all(step["status"] == "ok" for step in manifest["steps"])
+    assert manifest["date_range"] == {"start": "2024-01-01", "end": "2026-09-25"}
+
+    demographics = pd.read_csv(run / "demographics.csv")
+    assert set(demographics["report"]) == {
+        "demographics_by_content_type"
+    }  # the failing half is missing, rest kept
+    videos = pd.read_csv(run / "videos.csv")
+    assert videos["is_short"].tolist() == [True, True]
+    assert set(pd.read_csv(run / "video_daily.csv")["video_id"]) == {"v1", "v2"}
+    assert len(pd.read_csv(run / "retention.csv")) == 4
+    traffic = pd.read_csv(run / "traffic_sources.csv")
+    assert set(traffic["insightTrafficSourceType"]) == {"SHORTS", "YT_SEARCH"}
+    details = pd.read_csv(run / "traffic_source_details.csv")
+    assert {"video_traffic_detail", "channel_traffic_detail_YT_SEARCH"} <= set(details["report"])
+    assert len(pd.read_csv(run / "comments.csv")) == 1
+    for name in ("channel", "geography", "devices", "video_metrics", "channel_daily", "cities"):
+        assert len(pd.read_csv(run / f"{name}.csv")) > 0, name
+
+    saved = json.loads((run / "manifest.json").read_text())
+    assert saved["csv_row_counts"]["geography.csv"] == 2
+    assert (
+        saved["quota"]["data_api_units_used"] == 1 + 1 + 1 + 2
+    )  # channels, playlistItems, videos, 2x commentThreads
+    assert (run / "raw" / "analytics" / "channel" / "demographics.error.json").exists()
+    assert (run / "raw" / "analytics" / "channel" / "geography.json").exists()
+    # per-video queries start the day before publication, not at channel creation
+    daily = [q for q in queries if q.get("filters") == "video==v1" and q.get("dimensions") == "day"]
+    assert daily[0]["startDate"] == "2026-07-31"
+
+
+# ---------------------------------------------------------------- Reporting API
+
+
+def test_ensure_jobs_creates_only_missing_available_types() -> None:
+    service = MagicMock()
+    available = [{"id": t} for t in reporting.DEFAULT_REPORT_TYPES if t != "channel_sharing_service_a2"]
+    service.reportTypes.return_value.list.return_value = FakeRequest({"reportTypes": available})
+    service.jobs.return_value.list.return_value = FakeRequest(
+        {"jobs": [{"id": "j1", "reportTypeId": "channel_basic_a3"}]}
+    )
+    service.jobs.return_value.create.side_effect = lambda body: FakeRequest(
+        {"id": f"job-{body['reportTypeId']}", **body}
+    )
+    summary = reporting.ensure_jobs(service, no_sleep_caller())
+    created = [c["reportTypeId"] for c in summary["created"]]
+    assert "channel_reach_basic_a1" in created and "channel_reach_combined_a1" in created
+    assert "channel_basic_a3" not in created
+    assert summary["unavailable"] == ["channel_sharing_service_a2"]
+    assert len(created) == len(reporting.DEFAULT_REPORT_TYPES) - 2
+
+
+def test_download_all_writes_new_files_and_skips_existing(tmp_path: Path) -> None:
+    service = MagicMock()
+    service.jobs.return_value.list.return_value = FakeRequest(
+        {"jobs": [{"id": "j1", "reportTypeId": "channel_reach_basic_a1"}]}
+    )
+    reports = [
+        {
+            "id": "r1",
+            "startTime": "2026-09-01T07:00:00Z",
+            "endTime": "2026-09-02T07:00:00Z",
+            "downloadUrl": "https://x/r1",
+        },
+        {
+            "id": "r2",
+            "startTime": "2026-09-02T07:00:00Z",
+            "endTime": "2026-09-03T07:00:00Z",
+            "downloadUrl": "https://x/r2",
+        },
+    ]
+    service.jobs.return_value.reports.return_value.list.return_value = FakeRequest({"reports": reports})
+    existing = tmp_path / "channel_reach_basic_a1" / reporting.report_filename(reports[0])
+    existing.parent.mkdir(parents=True)
+    existing.write_text("old")
+    fetched: list[str] = []
+
+    def fetch(url: str) -> bytes:
+        fetched.append(url)
+        return b"date,video_id,video_thumbnail_impressions\n"
+
+    summary = reporting.download_all(service, no_sleep_caller(), tmp_path, fetch=fetch)
+    assert fetched == ["https://x/r2"]
+    assert summary["downloaded"] == 1 and summary["skipped_existing"] == 1
+    assert (
+        (tmp_path / "channel_reach_basic_a1" / "20260902T070000Z_20260903T070000Z_r2.csv")
+        .read_bytes()
+        .startswith(b"date,")
+    )
+
+
+# ---------------------------------------------------------------- auth + CLI
+
+
+def test_refresh_failure_falls_back_to_browser_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    token = tmp_path / "token.json"
+    token.write_text(json.dumps({"token": "old", "refresh_token": "r", "scopes": list(auth.BASE_SCOPES)}))
+    secret = tmp_path / "client_secret.json"
+    secret.write_text("{}")
+
+    stale = MagicMock(valid=False, refresh_token="r")
+    stale.refresh.side_effect = RefreshError("invalid_grant: Token has been expired or revoked.")
+    monkeypatch.setattr(auth.Credentials, "from_authorized_user_file", staticmethod(lambda *a, **k: stale))
+    fresh = MagicMock(valid=True)
+    fresh.to_json.return_value = json.dumps({"token": "new", "scopes": list(auth.BASE_SCOPES)})
+    flow = MagicMock()
+    flow.run_local_server.return_value = fresh
+    from_secrets = MagicMock(return_value=flow)
+    monkeypatch.setattr(auth.InstalledAppFlow, "from_client_secrets_file", from_secrets)
+
+    creds = auth.get_credentials(client_secret=secret, token_path=token, open_browser=False)
+    assert creds is fresh
+    assert from_secrets.call_args.kwargs["scopes"] == list(auth.BASE_SCOPES)
+    assert json.loads(token.read_text())["token"] == "new"
+
+
+def test_missing_client_secret_gives_setup_error(tmp_path: Path) -> None:
+    with pytest.raises(auth.AuthSetupError):
+        auth.get_credentials(client_secret=tmp_path / "nope.json", token_path=tmp_path / "token.json")
+
+
+def test_client_secret_discovery_picks_the_single_desktop_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(auth.CLIENT_SECRET_ENV, raising=False)
+    default = tmp_path / "client_secret.json"
+    (tmp_path / "client_secret_1-web.apps.googleusercontent.com.json").write_text('{"web": {}}')
+    desktop = tmp_path / "client_secret_2-desk.apps.googleusercontent.com.json"
+    desktop.write_text('{"installed": {}}')
+    assert auth.client_secret_path(default=default) == desktop
+    (tmp_path / "client_secret_3-desk.apps.googleusercontent.com.json").write_text('{"installed": {}}')
+    with pytest.raises(auth.AuthSetupError, match="Several Desktop-app"):
+        auth.client_secret_path(default=default)
+    default.write_text('{"installed": {}}')  # an explicit client_secret.json always wins
+    assert auth.client_secret_path(default=default) == default
+
+
+def test_monetary_scope_only_when_requested() -> None:
+    assert auth.ANALYTICS_MONETARY_READONLY not in auth.scopes_for(False)
+    assert auth.ANALYTICS_MONETARY_READONLY in auth.scopes_for(True)
+
+
+def test_cli_flags_parse() -> None:
+    args = build_parser().parse_args(
+        ["--since", "2025-01-01", "--max-videos", "3", "--skip-comments", "--monetary", "-v"]
+    )
+    assert (
+        args.since == date(2025, 1, 1)
+        and args.max_videos == 3
+        and args.skip_comments
+        and args.monetary
+        and args.verbose
+    )
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--since", "not-a-date"])
+
+
+def test_call_stats_summary_shape() -> None:
+    stats = CallStats()
+    stats.record("youtube", "channels.list")
+    stats.record("reporting", "jobs.list")
+    summary = stats.summary()
+    assert summary["data_api_units_used"] == 1 and summary["reporting_api_calls"] == {"jobs.list": 1}
