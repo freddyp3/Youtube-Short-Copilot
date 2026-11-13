@@ -10,6 +10,7 @@ GATE outcome is blanked (NaN), so it cannot reach a prompt, an example list or a
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import re
@@ -21,10 +22,13 @@ import pandas as pd
 
 from src.evals.hook_test import config as C
 from src.evals.hook_test.categorize import ERA_CUTOFF
+from src.evals.hook_test.score import criterion_b, ground_truth_for
+from src.evals.hook_test.stats import spearman
 from src.models import hazard as H
 from src.models import targets as T
 from src.models.dataset import load_split
 from src.models.features import M1_COLS, design, prepare
+from src.models.judge import score as S
 from src.models.judge.library import (JUDGE_DIR, K, RAW_DIR, SEED, TIERS, V3_RUNS, Library, curve_points,
                                       embed_timelines, implied_points, load_timelines, tiers)
 from src.models.judge.prompt import build_prompt
@@ -32,6 +36,11 @@ from src.models.judge.prompt import build_prompt
 log = logging.getLogger("gate")
 GATE_RUN = "20261113T000000Z_gate_v3"
 ITEMS = ("early_hold", "mid_hold", "late_hold", "replay_level")
+GEMINI = {"Gemini, no examples": "j1_L0_E_3.8-flash_gate", "Gemini, examples >= 0.75": "j1_L2_T75_3.8-flash_gate",
+          "Gemini, 5 similar": "j1_L2_E_3.8-flash_gate"}
+SPECIALIST = {"drop moments": "Gemini, no examples", "mid_hold": "Gemini, no examples", "late_hold": "Random forest",
+              "rewatch": "Gemini, examples >= 0.75", "early_hold": "Structure neighbours"}
+N_PERM = 10_000
 BLANKED = ["early_hold", "mid_hold", "late_hold", "replay_level", "like_rate", "share_rate", "comment_rate",
            "hold_resid", "hold_resid_views", "hold_score", "hook3s", "engagedViews"]
 
@@ -171,3 +180,101 @@ def check() -> int:
     fails = len(ok) != 40 or bad_w or problems
     print("EXIT CHECK:", "FAIL" if fails else "PASS")
     return int(bool(fails))
+
+
+def perm_p(x: np.ndarray, y: np.ndarray, rng) -> float:
+    obs = spearman(x, y)
+    null = np.array([spearman(x[rng.permutation(len(x))], y) for _ in range(N_PERM)])
+    return float((1 + np.sum(null >= obs)) / (1 + N_PERM))
+
+
+def holm(ps: dict[str, float]) -> dict[str, float]:
+    order = sorted(ps, key=ps.get)
+    out, running = {}, 0.0
+    for k, name in enumerate(order):
+        running = max(running, min(1.0, (len(order) - k) * ps[name]))
+        out[name] = running
+    return out
+
+
+def score() -> int:
+    gate = build_gate()
+    lib, idx, rows = gate.lib, gate.gate_idx, gate.rows
+    from src.evals.hook_test.data import load_export
+    export = load_export(Path(json.loads(C.SELECTION_JSON_PATH.read_text())["export_dir"]))
+    Y = gate.truth[["early_hold", "mid_hold", "late_hold"]].to_numpy()
+    replay = gate.truth["replay_level"].to_numpy()
+    ids = rows["video_id"].tolist()
+    order = {t: k for k, t in enumerate(TIERS)}
+    runs = {name: S.load_run(tag).set_index("video_id").loc[ids] for name, tag in GEMINI.items()}
+    n_bad = {name: int((f["status"] != "ok").sum()) for name, f in runs.items()}
+    pts = lambda f: f[["p10", "p25", "p50", "p75", "p95"]].to_numpy(dtype=float)
+    nb = [[j for j, _ in lib.neighbours(int(i), "S")] for i in idx]
+    holds = {name: S.residual_holds(pts(f), rows) for name, f in runs.items()}
+    holds["Random forest"] = gate.forest[:, :3]
+    holds["Per-second model"] = S.residual_holds(gate.per_second, rows)
+    holds["Structure neighbours"] = S.residual_holds(np.vstack([lib.points[j].mean(axis=0) for j in nb]), rows)
+    holds["Length only"] = S.residual_holds(np.vstack([lib.anchor(int(i)) for i in idx]), rows)
+    rewatch = {name: f["rewatch"].map(order).to_numpy(dtype=float) for name, f in runs.items()}
+    rewatch["Random forest"] = gate.forest[:, 3]
+    lib_replay = lib.df["replay_level"].to_numpy(dtype=float)
+    rewatch["Structure neighbours"] = np.array([lib_replay[j].mean() for j in nb])
+    gts = ground_truth_for(rows, export.retention)
+    drops = {name: criterion_b(rows.assign(dropoff_pred_s=f["drop1"].to_numpy()), gts, n_perms=N_PERM) for name, f in runs.items()}
+
+    rng = np.random.default_rng(SEED)
+    out = {"n": len(ids), "invalid_outputs": n_bad, "holds": {}, "rewatch": {}, "drops": {}, "tests": {}}
+    print(f"GATE: {len(ids)} videos; invalid Gemini outputs: {n_bad}")
+    print(f"\n{'source':28}{'early':>7}{'mid':>7}{'late':>7}{'mean':>7}{'rewatch':>9}{'drop':>7}")
+    for name, R in holds.items():
+        s = S.hold_scores(R, Y)
+        out["holds"][name] = s.round(4).tolist()
+        rw = spearman(rewatch[name], replay) if name in rewatch else float("nan")
+        if name in rewatch:
+            out["rewatch"][name] = rw
+        dr = drops[name]["T_obs"] if name in drops else float("nan")
+        if name in drops:
+            out["drops"][name] = {k: drops[name][k] for k in ("T_obs", "null1_uniform_p", "null2_permutation_p", "n_scored")}
+        fmt = lambda x: f"{x:>7.2f}" if x == x else f"{'':>7}"
+        print(f"{name:28}" + "".join(fmt(x) for x in s) + (f"{rw:>9.2f}" if rw == rw else f"{'':>9}") + fmt(dr))
+
+    col = {"early_hold": 0, "mid_hold": 1, "late_hold": 2}
+    ps = {}
+    for item, src in SPECIALIST.items():
+        if item == "drop moments":
+            d = drops[src]
+            ps[item] = max(d["null1_uniform_p"], d["null2_permutation_p"])
+            out["tests"][item] = {"source": src, "score": d["T_obs"], "p": ps[item],
+                                  "pass": bool(d["T_obs"] >= C.T_OBS_MIN and ps[item] < 0.05)}
+            continue
+        x, y = (rewatch[src], replay) if item == "rewatch" else (holds[src][:, col[item]], Y[:, col[item]])
+        r = spearman(x, y)
+        ps[item] = perm_p(x, y, rng)
+        b = [spearman(x[i], y[i]) for i in (rng.integers(0, len(x), len(x)) for _ in range(2000))]
+        out["tests"][item] = {"source": src, "score": r, "p": ps[item], "ci95": np.nanpercentile(b, [2.5, 97.5]).round(3).tolist(),
+                              "pass": bool(r > 0 and ps[item] <= 0.05)}
+    adj = holm(ps)
+    print(f"\n{'item':18}{'specialist':28}{'score':>7}{'p':>9}{'Holm p':>9}  result")
+    for item, t in out["tests"].items():
+        t["holm_p"] = adj[item]
+        ci = f"  (95% {t['ci95'][0]:.2f} to {t['ci95'][1]:.2f})" if "ci95" in t else ""
+        print(f"{item:18}{t['source']:28}{t['score']:>7.2f}{t['p']:>9.4f}{adj[item]:>9.4f}  {'PASS' if t['pass'] else 'fail'}{ci}")
+    S.SCORES.mkdir(parents=True, exist_ok=True)
+    (S.SCORES / "gate.json").write_text(json.dumps(out, indent=1, default=float))
+    return 0
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("extract").add_argument("--reverse", action="store_true")
+    sub.add_parser("check")
+    sub.add_parser("score")
+    a = p.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    return extract(a.reverse) if a.cmd == "extract" else check() if a.cmd == "check" else score()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
