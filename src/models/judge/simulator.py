@@ -12,11 +12,16 @@ does on this channel).
 
 from __future__ import annotations
 
+import argparse
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from src.evals.hook_test import config as C
+from src.evals.hook_test.data import load_export
 from src.evals.hook_test.stats import spearman
 from src.models import hazard as H
 from src.models import targets as T
@@ -30,6 +35,7 @@ SEGMENTS = {"early": (I2, I25), "mid": (I25, I75), "late": (I75, I95)}
 CHECK_IDX = [9, 24, 49, 74, 94]                      # 10, 25, 50, 75, 95 %
 RATIO_CLIP = (0.2, 1.6)
 BAND = (10, 90)
+CONFIG_JSON = JUDGE_DIR / "simulator_config.json"
 N_FLIPS = 10_000
 
 
@@ -204,3 +210,167 @@ def show(name: str, m: dict) -> None:
     print(f"{name:44}{m['curve_error']:>7.2f}{m['skill']:>8.3f}{m['skill_p']:>8.4f}{m['share_of_videos_improved']:>8.2f}"
           f"{m['full_curve_skill']:>8.3f}{m['shape_corr']:>7.2f}   " + " ".join(f"{x:5.2f}" for x in m["deviation_corr"])
           + "   " + " ".join(f"{k[0]}:{v:+.2f}" for k, v in m["segment_skill"].items()))
+
+
+HEADER = (f"{'configuration':44}{'error':>7}{'skill':>8}{'p':>8}{'better':>8}{'full':>8}{'shape':>7}"
+          "   deviation corr at 10/25/50/75/95    segment skill")
+
+LADDER = [("reference only (length)", (), False), ("+ late (forest)", ("late",), False),
+          ("+ mid (Gemini)", ("late", "mid"), False), ("+ early (structure neighbours)", ("late", "mid", "early"), False),
+          ("late + mid + per-second shape", ("late", "mid"), True),
+          ("late + mid + early + per-second shape", ("late", "mid", "early"), True),
+          ("per-second shape only", (), True)]
+
+
+def cmd_build() -> int:
+    lib = build()
+    export = load_export(Path(json.loads(C.SELECTION_JSON_PATH.read_text())["export_dir"]))
+    p = library_pieces(lib, export)
+    full = calibrate(p, np.arange(len(p.ids)))
+    print("calibration on all 145 (a, b):", {k: (round(a, 4), round(b, 3)) for k, (a, b) in full.items()})
+    print("signal vs real deviation (rank corr):", {s: round(spearman(p.signal[s], (ratios(p.truth) - ratios(p.ref))[:, k]), 2)
+                                                    for k, s in enumerate(SEGMENTS)})
+    print("\n" + HEADER)
+    res = {}
+    for name, use, shape in LADDER:
+        pred = oof_predict(p, use, shape)
+        res[name] = measures(pred, p)
+        show(name, res[name])
+        res[name]["coverage"] = band_coverage(pred, p)[0]
+    (S.SCORES / "simulator_build.json").write_text(json.dumps(res, indent=1, default=float))
+    print("\n80 % band coverage (out of fold):", {k: round(v["coverage"], 3) for k, v in res.items()})
+    return 0
+
+
+def cmd_gate() -> int:
+    from src.models.judge import gate as G
+
+    cfg = json.loads(CONFIG_JSON.read_text())
+    lib = build()
+    export = load_export(Path(json.loads(C.SELECTION_JSON_PATH.read_text())["export_dir"]))
+    p = library_pieces(lib, export)
+    calib = {k: tuple(v) for k, v in cfg["calibration"].items()}
+    gate = G.build_gate()
+    glib, idx, rows = gate.lib, gate.gate_idx, gate.rows
+    n = len(p.ids)
+    gids = rows["video_id"].tolist()
+    gdur = rows["duration_s"].to_numpy(dtype=float)
+    truth = normalise(raw_curves(export.retention, gids))
+    pool = np.arange(n)
+    ref = np.vstack([reference(p.truth, p.duration, pool, d) for d in gdur])
+    nb = [[j for j, _ in glib.neighbours(int(i), "S")] for i in idx]
+    run = S.load_run("j1_L0_E_3.8-flash_gate").set_index("video_id").loc[gids]
+    seg = H.build(lib.df, export.retention, lib.payoffs)
+    segg = H.build(rows, export.retention, glib.payoffs)
+    ps = H.fit_predict("ridge", np.column_stack([seg.base, seg.cov]), seg.y, np.column_stack([segg.base, segg.cov])).reshape(len(gids), -1)
+    signal = {"early": neighbour_early_signal(p.truth, p.duration, pool, nb, [None] * len(gids)),
+              "mid": gemini_mid_signal(run[["p10", "p25", "p50", "p75", "p95"]].to_numpy(dtype=float), ref),
+              "late": gate.forest[:, 2]}
+    gp = Pieces(gids, gdur, truth, ref, signal, ps, rows)
+    print("GATE check of the frozen simulator (not a clean test: GATE's source table has been seen)\n" + HEADER)
+    out = {}
+    for name, use, shape in [("reference only (length)", (), False), (f"FROZEN: {cfg['name']}", tuple(cfg["use"]), cfg["shape"])]:
+        pred = predict(gp, calib, use, shape)
+        out[name] = measures(pred, gp)
+        show(name, out[name])
+    res = truth[:, CHECK_IDX] - pred[:, CHECK_IDX]
+    lo, hi = np.array(cfg["band"])
+    out["coverage"] = float(((res >= lo) & (res <= hi)).mean())
+    print(f"80 % band coverage on GATE: {out['coverage']:.3f}")
+    (S.SCORES / "simulator_gate.json").write_text(json.dumps(out, indent=1, default=float))
+    return 0
+
+
+def v3_feature_frame(lib: Library) -> pd.DataFrame:
+    """The library table with the Gemini-derived M1 features recomputed from each video's v3 record."""
+    from src.models.judge.verify import v3_records
+    from src.tools.analyze_video.ab_score import ARC_ORD
+    from src.tools.analyze_video.derive import derive_features
+
+    df = lib.df.copy()
+    recs = v3_records(df)
+    pay = []
+    for i, row in enumerate(df.itertuples()):
+        r = recs[row.video_id]
+        d = derive_features(r["result"], r["duration_s_file"], [])
+        df.loc[i, "t_premise_clear_s"] = d["t_premise_clear_s"] if d["t_premise_clear_s"] is not None else row.duration_s
+        for c in ("payoff_count_all", "main_payoff_frac", "tail_all", "dead_time_s"):
+            df.loc[i, c] = d[c]
+        df.loc[i, "arc_ord"] = ARC_ORD[d["arc"]]
+        pay.append(r["result"]["payoffs"])
+    df["_payoffs"] = pay
+    return df
+
+
+def cmd_onecall() -> int:
+    lib = build()
+    export = load_export(Path(json.loads(C.SELECTION_JSON_PATH.read_text())["export_dir"]))
+    a = library_pieces(lib, export)
+    b = library_pieces(lib, export, v3_feature_frame(lib))
+    dev = ratios(a.truth) - ratios(a.ref)
+    print(f"{'signal (rank corr with real deviation)':42}{'v2 features':>12}{'v3 features':>12}")
+    worst = 0.0
+    for k, s in enumerate(SEGMENTS):
+        x, y = spearman(a.signal[s], dev[:, k]), spearman(b.signal[s], dev[:, k])
+        if s != "mid":
+            worst = max(worst, x - y)
+        print(f"{s + (' (Gemini; unchanged)' if s == 'mid' else ''):42}{x:>12.3f}{y:>12.3f}")
+    wa = float(np.nanmean([spearman(u, v) for u, v in zip(a.ps_loss, step_loss(a.truth))]))
+    wb = float(np.nanmean([spearman(u, v) for u, v in zip(b.ps_loss, step_loss(b.truth))]))
+    print(f"{'per-second shape (within-video corr)':42}{wa:>12.3f}{wb:>12.3f}")
+    worst = max(worst, wa - wb)
+    print(f"largest loss from using one v3 call: {worst:.3f} -> {'ONE CALL IS ENOUGH' if worst <= 0.05 else 'KEEP TWO CALLS'}")
+    return 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("cmd", choices=["onecall", "build", "gate"])
+    a = ap.parse_args(argv)
+    return {"onecall": cmd_onecall, "build": cmd_build, "gate": cmd_gate}[a.cmd]()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+# ---------------------------------------------------------------- candidate C2: direct calibration of the anchor levels
+
+ANCHORS = (I25, I75, I95)
+
+
+def direct_features(p: Pieces) -> np.ndarray:
+    """(n, 4 + 3): the three specialist signals, a constant, and the per-second model's own deviation at each anchor."""
+    ps = np.vstack([assemble(p.ref[i], None, p.ps_loss[i]) for i in range(len(p.ids))])
+    return np.column_stack([np.ones(len(p.ids)), p.signal["early"], p.signal["mid"], p.signal["late"],
+                            np.log(ps[:, ANCHORS]) - np.log(p.ref[:, ANCHORS])])
+
+
+def fit_direct(F: np.ndarray, p: Pieces, rows: np.ndarray, ridge: float = 1.0) -> np.ndarray:
+    """(7, 3) coefficients: log deviation of the real level at each anchor on the features (light ridge, not on the constant)."""
+    Y = np.log(p.truth[rows][:, ANCHORS]) - np.log(p.ref[rows][:, ANCHORS])
+    X = F[rows]
+    mu, sd = X[:, 1:].mean(axis=0), X[:, 1:].std(axis=0)
+    Z = np.column_stack([np.ones(len(rows)), (X[:, 1:] - mu) / sd])
+    pen = np.diag([0.0] + [ridge] * (Z.shape[1] - 1))
+    return np.linalg.solve(Z.T @ Z + pen, Z.T @ Y), mu, sd
+
+
+def predict_direct(F: np.ndarray, p: Pieces, model, rows: np.ndarray, shape: bool = True) -> np.ndarray:
+    coef, mu, sd = model
+    Z = np.column_stack([np.ones(len(rows)), (F[rows][:, 1:] - mu) / sd])
+    lvl = p.ref[rows][:, ANCHORS] * np.exp(Z @ coef)
+    out = []
+    for k, i in enumerate(rows):
+        t = {"early": lvl[k, 0] / 100, "mid": lvl[k, 1] / lvl[k, 0], "late": lvl[k, 2] / lvl[k, 1]}
+        out.append(assemble(p.ref[i], t, p.ps_loss[i] if shape else None))
+    return np.vstack(out)
+
+
+def oof_direct(p: Pieces, ridge: float = 1.0, shape: bool = True) -> np.ndarray:
+    n = len(p.ids)
+    F = direct_features(p)
+    out = np.empty((n, 100))
+    for f in oof_folds(n):
+        out[f] = predict_direct(F, p, fit_direct(F, p, np.setdiff1d(np.arange(n), f), ridge), f, shape)
+    return out
