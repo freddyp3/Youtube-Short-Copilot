@@ -17,7 +17,9 @@ import hashlib
 import hmac
 import secrets
 import sqlite3
+import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -29,6 +31,7 @@ from src.server.store import connect, init_schema, transaction
 TOKEN_BYTES = 32
 MAX_TOKEN_CHARS = 128
 MAX_LABEL_CHARS = 80
+MAX_TRACKED_ADDRESSES = 10_000
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tokens (
@@ -125,6 +128,50 @@ def revoke(token_id: str, db_path: Path | str | None = None) -> bool:
 
 def list_tokens(db_path: Path | str | None = None) -> list[TokenInfo]:
     return Tokens(db_path).list_tokens()
+
+
+class FailureLimiter:
+    """In-memory count of failed verifications per client address over a sliding window.
+
+    ``record_failure(addr)`` after every rejected token; ``blocked(addr)`` before verifying. An address is blocked
+    while it has ``max_failures`` or more failures inside the last ``window_s`` seconds. Memory is bounded: at
+    most ``max_addresses`` are tracked, the least recently failing ones are dropped first.
+    """
+
+    def __init__(self, max_failures: int = config.BAD_TOKEN_MAX, window_s: float = config.BAD_TOKEN_WINDOW_S,
+                 clock: Callable[[], float] = time.time, max_addresses: int = MAX_TRACKED_ADDRESSES):
+        self.max_failures, self.window_s, self.clock, self.max_addresses = max_failures, window_s, clock, max_addresses
+        self._failures: dict[str, deque[float]] = {}
+        self._lock = threading.Lock()
+
+    def _recent(self, addr: str, now: float) -> deque[float] | None:
+        times = self._failures.get(addr)
+        if times is None:
+            return None
+        while times and times[0] <= now - self.window_s:
+            times.popleft()
+        if not times:
+            del self._failures[addr]
+            return None
+        return times
+
+    def record_failure(self, addr: str) -> None:
+        now = self.clock()
+        with self._lock:
+            times = self._recent(addr, now)
+            if times is None:
+                if len(self._failures) >= self.max_addresses:
+                    for other in list(self._failures):
+                        self._recent(other, now)
+                    while len(self._failures) >= self.max_addresses:
+                        del self._failures[min(self._failures, key=lambda a: self._failures[a][-1])]
+                times = self._failures[addr] = deque(maxlen=max(1, self.max_failures))
+            times.append(now)
+
+    def blocked(self, addr: str) -> bool:
+        with self._lock:
+            times = self._recent(addr, self.clock())
+            return times is not None and len(times) >= self.max_failures
 
 
 def _when(ts: float | None) -> str:
