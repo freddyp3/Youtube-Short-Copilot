@@ -31,17 +31,23 @@ import html
 import ipaddress
 import logging
 import re
+import subprocess
 import threading
+import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import anyio
 import mcp_types as types
 from mcp.server.lowlevel import Server
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.server.transport_security import TransportSecuritySettings
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import MultipartParser, parse_options_header
+from starlette.applications import Starlette
 from starlette.datastructures import Headers
 from starlette.requests import ClientDisconnect, Request
 from starlette.responses import Response
@@ -58,14 +64,18 @@ log = logging.getLogger("so.server")
 
 DEFAULT_PORT = 8765
 LOOPBACK = ("127.0.0.1", "::1")
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 UPLOAD_BODY_TIMEOUT_S = 120.0
 MAX_KEY_CHARS = 200
 MAX_FORM_OVERHEAD_BYTES = 64 * 1024
+MAX_MCP_BODY_BYTES = 64 * 1024
 MAX_CALLS_PER_TOKEN = 4
 MAX_TOOL_THREADS = 24
+PURGE_EVERY_S = 3600.0
 UPLOAD_ID = re.compile(r"[A-Za-z0-9_-]{20,64}")
 BEARER = re.compile(r"Bearer\s+(\S+)", re.I)
 KEY_SHAPE = re.compile(r"[\x21-\x7e]+")
+ASSISTANT_ORIGINS = ("https://claude.ai", "https://claude.com")
 SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
     "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "Cache-Control": "no-store",
@@ -207,6 +217,52 @@ class AppState:
     tool_threads: anyio.CapacityLimiter | None = None      # tool calls may wait; they get their own threads
 
 
+def _flag(env: Mapping[str, str], name: str) -> bool:
+    return env.get(name, "").strip() == "1"
+
+
+def _is_local(url: str) -> bool:
+    return (urlsplit(url).hostname or "") in LOCAL_HOSTS
+
+
+def load_options(env: Mapping[str, str], cfg: config.Config) -> Options:
+    """The app's own switches, checked together with the public address. Raises StartupError."""
+    try:
+        port = int(env.get("SO_PORT", "").strip() or DEFAULT_PORT)
+    except ValueError:
+        raise StartupError("SO_PORT is not a number") from None
+    if not 1 <= port <= 65535:
+        raise StartupError("SO_PORT must be 1-65535")
+    opts = Options(port, _flag(env, "SO_ALLOW_PATH_TOKEN"), _flag(env, "SO_ALLOW_INSECURE_LOCAL"), _flag(env, "SO_FAKE_ANALYSIS"))
+    check_public_url(cfg.PUBLIC_BASE_URL, opts.allow_insecure_local)
+    if opts.fake_analysis and not (opts.allow_insecure_local and _is_local(cfg.PUBLIC_BASE_URL)):
+        raise StartupError("SO_FAKE_ANALYSIS=1 is only allowed with SO_ALLOW_INSECURE_LOCAL=1 and a local SO_PUBLIC_BASE_URL")
+    return opts
+
+
+def check_public_url(url: str | None, allow_insecure_local: bool = False) -> None:
+    if not url:
+        raise StartupError("SO_PUBLIC_BASE_URL is not set (the https address users reach this server at)")
+    parts = urlsplit(url)
+    if not parts.hostname or parts.query or parts.fragment or parts.username or parts.password:
+        raise StartupError("SO_PUBLIC_BASE_URL must be a plain address such as https://example.org")
+    if parts.scheme == "https" or (parts.scheme == "http" and allow_insecure_local and _is_local(url)):
+        return
+    raise StartupError("SO_PUBLIC_BASE_URL must start with https:// (http://127.0.0.1 only with SO_ALLOW_INSECURE_LOCAL=1)")
+
+
+def check_binaries(run: Callable = subprocess.run) -> None:
+    """ffprobe and ffmpeg must run, or no upload could be checked or analysed."""
+    for name in ("ffprobe", "ffmpeg"):
+        try:
+            ok = run([name, "-version"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     timeout=20, check=False).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+        if not ok:
+            raise StartupError(f"{name} is not installed or does not run; the server needs ffprobe and ffmpeg")
+
+
 def _stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -232,6 +288,62 @@ def _unlink(path: Path) -> None:
         path.unlink(missing_ok=True)
     except OSError as exc:
         log.error("%s could not delete an upload file class=%s", _stamp(), type(exc).__name__)
+
+
+def settle_interrupted(state: AppState, draft_ids: list[str]) -> None:
+    """Settle drafts whose job died with what their job had recorded as spent."""
+    if not draft_ids:
+        return
+    con = connect(state.cfg.DB_PATH)
+    try:
+        spent = dict(con.execute("SELECT draft_id, COALESCE(SUM(usd), 0) FROM spend WHERE kind IN ('cost', 'own_cost') "
+                                 f"AND draft_id IN ({','.join('?' * len(draft_ids))}) GROUP BY draft_id", draft_ids))
+    finally:
+        con.close()
+    for draft_id in draft_ids:
+        state.quota.settle(draft_id, float(spent.get(draft_id, 0.0)))
+
+
+def recover(state: AppState) -> dict:
+    """Start-up, before any job runs: fail drafts a dead process left in ``processing`` and settle them with the
+    cost recorded so far, re-open links whose upload was cut off, delete every leftover upload file."""
+    cfg = state.cfg
+    cfg.UPLOAD_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    interrupted = state.store.fail_interrupted()
+    settle_interrupted(state, interrupted)
+    con = connect(cfg.DB_PATH)
+    try:
+        cut_off = [r[0] for r in con.execute("SELECT id FROM drafts WHERE status = 'waiting_for_upload' "
+                                             "AND claimed_at IS NOT NULL")]
+    finally:
+        con.close()
+    for draft_id in cut_off:
+        state.store.release_upload(draft_id)
+    files = [p for p in cfg.UPLOAD_DIR.iterdir() if p.is_file() or p.is_symlink()]
+    for p in files:
+        _unlink(p)
+    return {"interrupted": len(interrupted), "reopened": len(cut_off), "files": len(files)}
+
+
+def orphan_files(state: AppState) -> list[Path]:
+    """Upload files that belong to no upload in flight and no running job. Files are listed before the live ids
+    are read, so a file just created is never among them. Call on the thread that owns ``in_flight``."""
+    files = [p for p in state.cfg.UPLOAD_DIR.iterdir() if p.is_file() or p.is_symlink()] if state.cfg.UPLOAD_DIR.is_dir() else []
+    live = set(state.in_flight) | state.runner.active_ids()
+    return [p for p in files if p.name not in live]
+
+
+def purge(state: AppState, orphans: list[Path] | None = None) -> dict:
+    """Expired rows per ``store.purge`` (stale jobs are settled with their recorded cost), old start counters,
+    and orphan upload files. Nothing else is deleted."""
+    orphans = orphan_files(state) if orphans is None else orphans
+    done = state.store.purge()
+    settle_interrupted(state, done["interrupted"])
+    state.starts.purge()
+    for p in orphans:
+        _unlink(p)
+    return {"expired": len(done["expired"]), "interrupted": len(done["interrupted"]), "deleted": len(done["deleted"]),
+            "files": len(orphans)}
 
 
 # ---------------------------------------------------------------------------------------------------------- logging
@@ -638,3 +750,68 @@ class Body:
                 seen += len(chunk)
                 if seen > max_bytes:
                     break
+
+
+# -------------------------------------------------------------------------------------------------------------- app
+
+def build_app(cfg: config.Config, *, analyze: Callable | None = None, warm: Callable[[], object] | None = None,
+              similar: Callable | None = None, brief: Callable | None = None, clock: Callable[[], float] = time.time,
+              allow_path_token: bool = False, allow_insecure_local: bool = False,
+              upload_timeout_s: float = UPLOAD_BODY_TIMEOUT_S, purge_every_s: float = PURGE_EVERY_S) -> RequestLog:
+    """The ASGI app. ``analyze`` replaces ``analyze_draft``; ``warm`` loads the library in a background thread
+    (None: nothing to load, ready at once); ``similar`` / ``brief`` replace the functions of ``audience.brief``.
+    Start-up recovery, the first purge and the warm-up run when the app's lifespan starts."""
+    check_public_url(cfg.PUBLIC_BASE_URL, allow_insecure_local)
+    ready = threading.Event()
+    cfg.UPLOAD_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    store = Store(cfg.DB_PATH, clock, upload_ttl_s=cfg.UPLOAD_TTL_S, result_ttl_s=cfg.RESULT_TTL_S)
+    quota = Quota(cfg.DB_PATH, clock, cfg)
+    runner = JobRunner(store, quota, analyze, cfg.MAX_JOBS_TOTAL, cfg.MAX_JOBS_PER_USER, ready,
+                       on_done=lambda token_id, outcome, cost: log_line(token_id, "job", outcome, cost))
+    state = AppState(cfg=cfg, store=store, quota=quota, tokens=Tokens(cfg.DB_PATH, clock),
+                     limiter=FailureLimiter(cfg.BAD_TOKEN_MAX, cfg.BAD_TOKEN_WINDOW_S, clock),
+                     starts=tools.StartLimiter(cfg.DB_PATH, clock), runner=runner, refusals=tools.Refusals(), ready=ready,
+                     similar=similar, brief=brief, upload_timeout_s=upload_timeout_s)
+    public = urlsplit(cfg.PUBLIC_BASE_URL)
+    origin = f"{public.scheme}://{public.netloc}"
+    manager = StreamableHTTPSessionManager(
+        app=build_mcp(state), json_response=True, stateless=True, max_request_body_size=MAX_MCP_BODY_BYTES,
+        security_settings=TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=[public.netloc, "127.0.0.1:*", "localhost:*", "[::1]:*"],
+            allowed_origins=[origin, *ASSISTANT_ORIGINS, "http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]))
+
+    def warm_up() -> None:
+        try:
+            if warm is not None:
+                warm()
+        except Exception as exc:
+            log.error("%s library warm-up failed class=%s", _stamp(), type(exc).__name__)
+        finally:
+            ready.set()
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: Starlette) -> AsyncIterator[None]:
+        log.info("%s start-up recovered=%s purged=%s", _stamp(), recover(state), purge(state))
+        threading.Thread(target=warm_up, name="so-warm", daemon=True).start()
+
+        async def purge_loop() -> None:
+            while True:
+                await anyio.sleep(purge_every_s)
+                try:
+                    log.info("%s purge %s", _stamp(), await anyio.to_thread.run_sync(purge, state, orphan_files(state)))
+                except Exception as exc:
+                    log.error("%s purge failed class=%s", _stamp(), type(exc).__name__)
+
+        async with manager.run(), anyio.create_task_group() as tg:
+            tg.start_soon(purge_loop)
+            try:
+                yield
+            finally:
+                tg.cancel_scope.cancel()
+                runner.shutdown(wait=False)
+
+    routes = [Route("/mcp", endpoint=McpAuth(state, manager.handle_request)), *upload_routes(state)]
+    if allow_path_token:
+        routes.append(Route("/t/{token}/mcp", endpoint=McpAuth(state, manager.handle_request, path_token=True)))
+    return RequestLog(Starlette(debug=False, routes=routes, lifespan=lifespan), state)
