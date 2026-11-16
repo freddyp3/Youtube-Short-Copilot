@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import html
 import ipaddress
 import logging
 import re
@@ -34,12 +35,17 @@ import threading
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 import anyio
 import mcp_types as types
 from mcp.server.lowlevel import Server
+from python_multipart.exceptions import MultipartParseError
+from python_multipart.multipart import MultipartParser, parse_options_header
 from starlette.datastructures import Headers
+from starlette.requests import ClientDisconnect, Request
 from starlette.responses import Response
+from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from src.server import config, media, tools
@@ -53,9 +59,17 @@ log = logging.getLogger("so.server")
 DEFAULT_PORT = 8765
 LOOPBACK = ("127.0.0.1", "::1")
 UPLOAD_BODY_TIMEOUT_S = 120.0
+MAX_KEY_CHARS = 200
+MAX_FORM_OVERHEAD_BYTES = 64 * 1024
 MAX_CALLS_PER_TOKEN = 4
 MAX_TOOL_THREADS = 24
+UPLOAD_ID = re.compile(r"[A-Za-z0-9_-]{20,64}")
 BEARER = re.compile(r"Bearer\s+(\S+)", re.I)
+KEY_SHAPE = re.compile(r"[\x21-\x7e]+")
+SECURITY_HEADERS = {
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+    "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "Cache-Control": "no-store",
+}
 
 INSTRUCTIONS = """Shorts Pre-Publish Copilot checks a draft YouTube Short before it is posted. It was built on one \
 Brawl Stars channel: every prediction is relative to that channel's audience and its past Shorts of the same length. \
@@ -137,6 +151,17 @@ TOOL_FUNCTIONS: dict[str, Callable[..., dict]] = {
     "start_draft": tools.start_draft, "get_draft_status": tools.get_draft_status, "get_retention": tools.get_retention,
     "get_similar_shorts": tools.get_similar_shorts, "get_audience_brief": tools.get_audience_brief}
 
+MSG_LINK_GONE = "This upload link is not valid any more. Go back to the chat and ask for a new one."
+MSG_RECEIVED = "Upload received. Go back to the chat and say you're done."
+MSG_BAD_FORM = "The upload could not be read. Please choose the video file and press Upload again."
+MSG_NO_FILE = "No video file was chosen. Please choose the video file and press Upload."
+MSG_TIMEOUT = "The upload took longer than two minutes and was stopped. Please try again on a faster connection."
+MSG_BAD_KEY = "That does not look like a Gemini API key. Please check it, or leave the field empty."
+MSG_SERVER_ERROR = "Something went wrong on the server. Please try again."
+MSG_TRY_AGAIN = "You can try again with this same link below."
+MSG_NEW_LINK = "This link can no longer be used. Go back to the chat and ask for a new one."
+
+
 class StartupError(RuntimeError):
     """The server must not start; the message is shown to the operator."""
 
@@ -200,6 +225,13 @@ def client_address(scope: Scope) -> str:
         with contextlib.suppress(ValueError):
             return str(ipaddress.ip_address((Headers(scope=scope).get("cf-connecting-ip") or "").strip()))
     return peer
+
+
+def _unlink(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        log.error("%s could not delete an upload file class=%s", _stamp(), type(exc).__name__)
 
 
 # ---------------------------------------------------------------------------------------------------------- logging
@@ -343,3 +375,266 @@ def build_mcp(state: AppState) -> Server:
 
     return Server("shorts-pre-publish-copilot", version="0.1.0", title="Shorts Pre-Publish Copilot",
                   instructions=INSTRUCTIONS, on_list_tools=list_tools, on_call_tool=call_tool)
+
+
+# ------------------------------------------------------------------------------------------------------ upload page
+
+STYLE = ("body{font-family:system-ui,sans-serif;max-width:34rem;margin:2rem auto;padding:0 1rem;line-height:1.45}"
+         "label{display:block;margin-top:1rem;font-weight:600}input{display:block;margin-top:.3rem;max-width:100%}"
+         "button{margin-top:1.2rem;padding:.5rem 1.2rem;font-size:1rem}.note{color:#555;font-size:.9rem}"
+         ".msg{padding:.7rem 1rem;border-left:4px solid #888;background:#f3f3f3}")
+
+
+def _form(cfg: config.Config) -> str:
+    kinds = ", ".join(cfg.ALLOWED_CONTAINERS)
+    return (
+        '<form method="post" enctype="multipart/form-data">'
+        '<label for="video">Video file</label>'
+        '<input id="video" name="video" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" required>'
+        f'<p class="note">Accepted: {html.escape(kinds)}; {cfg.MIN_DURATION_S:g} to {cfg.MAX_DURATION_S:g} seconds long; '
+        f'vertical or square; at most {cfg.MAX_UPLOAD_BYTES / config.MIB:g} MB. The video is deleted from the server '
+        'as soon as the analysis is finished.</p>'
+        '<label for="gemini_key">Your own Gemini API key (optional)</label>'
+        f'<input id="gemini_key" name="gemini_key" type="password" maxlength="{MAX_KEY_CHARS}" autocomplete="off">'
+        '<p class="note">Leave empty to use one of your free drafts for today. With your own key the analysis is paid '
+        'by your key; it is used for this one video only and is never stored.</p>'
+        '<button type="submit">Upload</button></form>')
+
+
+def page(status: int, message: str | None = None, form: str | None = None, extra: str | None = None) -> Response:
+    parts = [f'<p class="msg">{html.escape(message, quote=False)}</p>' if message else "",
+             f"<p>{html.escape(extra, quote=False)}</p>" if extra else "", form or ""]
+    body = ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1"><title>Upload your draft Short</title>'
+            f"<style>{STYLE}</style></head><body><h1>Upload your draft Short</h1>{''.join(parts)}</body></html>")
+    return Response(body, status_code=status, media_type="text/html; charset=utf-8", headers=SECURITY_HEADERS)
+
+
+def plain(status: int, message: str) -> Response:
+    return Response(message + "\n", status_code=status, media_type="text/plain; charset=utf-8", headers=SECURITY_HEADERS)
+
+
+def limit_message(exc: LimitReached, cfg: config.Config) -> str:
+    when = exc.retry_after_utc.replace("T", " ").replace("Z", " UTC")
+    own = " You can still upload now with your own Gemini API key."
+    return {
+        "user_daily": f"You have used today's {cfg.DRAFTS_PER_DAY} free drafts. The limit resets at {when}.{own}",
+        "day_cap": f"The server has reached its spending limit for today. It resets at {when}.{own}",
+        "month_cap": f"The server has reached its spending limit for this month. It resets at {when}.{own}",
+        "own_key_daily": f"You have reached today's limit of {cfg.OWN_KEY_DRAFTS_PER_DAY} drafts with your own key. "
+                         f"It resets at {when}.",
+    }.get(exc.kind, f"A limit was reached. It resets at {when}.")
+
+
+class Refusal(Exception):
+    """The upload ends here with this sentence; the link is released when it still can be."""
+
+    def __init__(self, outcome: str, message: str, status: int):
+        self.outcome, self.message, self.status = outcome, message, status
+        super().__init__(outcome)
+
+
+class UploadForm:
+    """Streaming multipart reader: the bytes of the first ``video`` part are handed on as they arrive, the
+    ``gemini_key`` field is kept in memory (bounded), everything else is counted and dropped."""
+
+    def __init__(self, boundary: bytes):
+        self._out: list[bytes] = []
+        self._key = bytearray()
+        self._name, self._value, self._headers = bytearray(), bytearray(), {}
+        self._part: str | None = None
+        self.file_seen, self.key_too_long, self._overhead = False, False, 0
+        self._parser = MultipartParser(boundary, {
+            "on_part_begin": self._part_begin, "on_header_field": self._header_field, "on_header_value": self._header_value,
+            "on_header_end": self._header_end, "on_headers_finished": self._headers_finished, "on_part_data": self._part_data})
+
+    def _count(self, n: int) -> None:
+        self._overhead += n
+        if self._overhead > MAX_FORM_OVERHEAD_BYTES:
+            raise Refusal("bad_form", MSG_BAD_FORM, 400)
+
+    def _part_begin(self) -> None:
+        self._headers, self._part = {}, None
+
+    def _header_field(self, data: bytes, start: int, end: int) -> None:
+        self._count(end - start)
+        self._name += data[start:end]
+
+    def _header_value(self, data: bytes, start: int, end: int) -> None:
+        self._count(end - start)
+        self._value += data[start:end]
+
+    def _header_end(self) -> None:
+        self._headers[bytes(self._name).lower()] = bytes(self._value)
+        self._name, self._value = bytearray(), bytearray()
+
+    def _headers_finished(self) -> None:
+        _, options = parse_options_header(self._headers.get(b"content-disposition", b""))
+        name = options.get(b"name", b"")
+        if name == b"video" and not self.file_seen:
+            self._part, self.file_seen = "video", True
+        elif name == b"gemini_key" and not self._key:
+            self._part = "key"
+        else:
+            self._part = "other"
+
+    def _part_data(self, data: bytes, start: int, end: int) -> None:
+        if self._part == "video":
+            self._out.append(bytes(data[start:end]))
+            return
+        self._count(end - start)
+        if self._part == "key":
+            if len(self._key) + end - start > 4 * MAX_KEY_CHARS:
+                self.key_too_long = True
+            else:
+                self._key += data[start:end]
+
+    async def file_chunks(self, body: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+        async for chunk in body:
+            self._parser.write(chunk)
+            out, self._out = self._out, []
+            for piece in out:
+                yield piece
+        self._parser.finalize()
+
+    def take_key(self) -> str | None:
+        """The own key (stripped; None when the field was empty). Raises Refusal for a value that cannot be a key.
+        The buffer is wiped: after this call the key exists only in the caller's variable."""
+        try:
+            text = bytes(self._key).decode("utf-8").strip()
+        except UnicodeDecodeError:
+            text = "\x00"
+        finally:
+            self._key[:] = b"\x00" * len(self._key)
+            self._key = bytearray()
+        if self.key_too_long or len(text) > MAX_KEY_CHARS or (text and not KEY_SHAPE.fullmatch(text)):
+            raise Refusal("bad_key", MSG_BAD_KEY, 400)
+        return text or None
+
+
+def upload_routes(state: AppState) -> list[Route]:
+    cfg, store = state.cfg, state.store
+    thread = anyio.to_thread.run_sync
+
+    async def is_open(request: Request) -> str | None:
+        upload_id = request.path_params["upload_id"]
+        return upload_id if UPLOAD_ID.fullmatch(upload_id) and await thread(store.upload_open, upload_id) else None
+
+    async def show(request: Request) -> Response:
+        info: RequestInfo = request.scope["so"]
+        info.route = "/u/{upload_id}"
+        if await is_open(request) is None:
+            info.outcome = "not_found"
+            return plain(404, MSG_LINK_GONE)
+        info.outcome = "form"
+        return page(200, form=_form(cfg))
+
+    async def receive(request: Request) -> Response:
+        info: RequestInfo = request.scope["so"]
+        info.route = "/u/{upload_id}"
+        upload_id = await is_open(request)
+        if upload_id is None:
+            info.outcome = "not_found"
+            return plain(404, MSG_LINK_GONE)
+        kind, options = parse_options_header(request.headers.get("content-type", ""))
+        boundary = options.get(b"boundary", b"")
+        if kind != b"multipart/form-data" or not boundary or len(boundary) > 200:
+            info.outcome = "refused:bad_form"
+            return page(400, MSG_BAD_FORM, _form(cfg))
+        declared = request.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > cfg.MAX_UPLOAD_BYTES + MAX_FORM_OVERHEAD_BYTES:
+            info.outcome = "refused:too_large"
+            return page(413, media.default_message("too_large", cfg), _form(cfg), MSG_TRY_AGAIN)
+        try:
+            draft = await thread(store.claim_upload, upload_id)
+        except UploadUnavailable:
+            info.outcome = "not_found"
+            return plain(404, MSG_LINK_GONE)
+        info.token_id = draft.token_id
+        dest, form, body = cfg.UPLOAD_DIR / draft.id, UploadForm(boundary), Body(request.receive)
+        state.in_flight.add(draft.id)
+        reserved = handed_over = False
+        refusal: Refusal | None = None
+        own_key: str | None = None
+        try:
+            try:
+                with anyio.fail_after(state.upload_timeout_s):
+                    try:
+                        size = await media.save_stream_async(form.file_chunks(body), dest, cfg.MAX_UPLOAD_BYTES, cfg)
+                    except media.Rejected:
+                        await body.drain(cfg.MAX_UPLOAD_BYTES)
+                        raise
+            except TimeoutError:
+                raise Refusal("timeout", MSG_TIMEOUT, 408) from None
+            except (MultipartParseError, FileExistsError):
+                raise Refusal("bad_form", MSG_BAD_FORM, 400) from None
+            own_key = form.take_key()
+            if not form.file_seen or size == 0:
+                raise Refusal("no_file", MSG_NO_FILE, 400)
+            await thread(media.validate, dest, cfg)
+            paid_by = "own_key" if own_key else "server"
+            try:
+                await thread(state.quota.check_and_reserve, draft.token_id, draft.id, paid_by)
+            except LimitReached as exc:
+                raise Refusal(f"limit:{exc.kind}", limit_message(exc, cfg), 429) from None
+            reserved = True
+            try:
+                state.runner.submit(draft, dest, own_key)
+            except JobRefused as exc:
+                raise Refusal(f"busy:{exc.kind}", exc.user_message, 503) from None
+            except DraftStateError:
+                raise Refusal("gone", MSG_NEW_LINK, 409) from None
+            handed_over = True
+            state.refusals.clear(draft.id)
+            info.outcome = f"accepted:{paid_by}"
+            return page(200, MSG_RECEIVED)
+        except media.Rejected as exc:
+            refusal = Refusal(f"refused:{exc.code}", exc.user_message, 413 if exc.code == "too_large" else 400)
+        except Refusal as exc:
+            refusal = exc
+        except ClientDisconnect:
+            refusal = Refusal("disconnected", MSG_BAD_FORM, 400)
+        except Exception as exc:
+            refusal = Refusal(f"error:{type(exc).__name__}", MSG_SERVER_ERROR, 500)
+        finally:
+            own_key = None
+            if not handed_over:
+                with anyio.CancelScope(shield=True):
+                    _unlink(dest)
+                    if reserved:
+                        await thread(state.quota.cancel, draft.id)
+                    await thread(store.release_upload, draft.id)
+            state.in_flight.discard(draft.id)
+        info.outcome = refusal.outcome
+        state.refusals.put(draft.id, refusal.message)
+        if await thread(store.upload_open, upload_id):
+            return page(refusal.status, refusal.message, _form(cfg), MSG_TRY_AGAIN)
+        return page(refusal.status, refusal.message, extra=None if refusal.message == MSG_NEW_LINK else MSG_NEW_LINK)
+
+    return [Route("/u/{upload_id:path}", show, methods=["GET"]), Route("/u/{upload_id:path}", receive, methods=["POST"])]
+
+
+class Body:
+    """The request body as chunks, remembering whether it has ended (reading past the end would wait for ever)."""
+
+    def __init__(self, receive: Receive):
+        self.receive, self.ended = receive, False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        while not self.ended:
+            message = await self.receive()
+            if message["type"] != "http.request":
+                self.ended = True
+                raise ClientDisconnect()
+            self.ended = not message.get("more_body", False)
+            if message.get("body"):
+                yield message["body"]
+
+    async def drain(self, max_bytes: int) -> None:
+        """Read and drop the rest of a refused body (bounded), so the browser gets the answer instead of a reset."""
+        seen = 0
+        with contextlib.suppress(ClientDisconnect):
+            async for chunk in self:
+                seen += len(chunk)
+                if seen > max_bytes:
+                    break
