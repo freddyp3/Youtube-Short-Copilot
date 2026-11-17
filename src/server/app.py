@@ -30,14 +30,17 @@ import contextvars
 import html
 import ipaddress
 import logging
+import os
 import re
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import anyio
@@ -63,6 +66,7 @@ from src.server.store import DraftStateError, Store, UploadUnavailable, connect
 log = logging.getLogger("so.server")
 
 DEFAULT_PORT = 8765
+HOST = "127.0.0.1"
 LOOPBACK = ("127.0.0.1", "::1")
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 UPLOAD_BODY_TIMEOUT_S = 120.0
@@ -76,6 +80,7 @@ UPLOAD_ID = re.compile(r"[A-Za-z0-9_-]{20,64}")
 BEARER = re.compile(r"Bearer\s+(\S+)", re.I)
 KEY_SHAPE = re.compile(r"[\x21-\x7e]+")
 ASSISTANT_ORIGINS = ("https://claude.ai", "https://claude.com")
+OFFLINE_ENV = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
 SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
     "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "Cache-Control": "no-store",
@@ -815,3 +820,118 @@ def build_app(cfg: config.Config, *, analyze: Callable | None = None, warm: Call
     if allow_path_token:
         routes.append(Route("/t/{token}/mcp", endpoint=McpAuth(state, manager.handle_request, path_token=True)))
     return RequestLog(Starlette(debug=False, routes=routes, lifespan=lifespan), state)
+
+
+# --------------------------------------------------------------------------------------------- fake analysis (local)
+
+def fake_analyze(video_path, api_key=None, on_cost=None, on_step=None, delay_s: float = 2.0):
+    """Canned analysis for local runs without Gemini or the library (SO_FAKE_ANALYSIS=1). Same shape as
+    ``analyze_draft``'s output; the numbers mean nothing."""
+    for step in ("measuring", "describing", "judging", "modelling"):
+        if on_step:
+            on_step(step)
+        time.sleep(delay_s / 4)
+        if on_cost and step in ("describing", "judging"):
+            on_cost(0.01)
+    grid = list(range(0, 100, 5)) + [99]
+    curve = [round(100 - 0.55 * p, 1) for p in grid]
+    seg = lambda a, b, verdict, why: {"from_pct": a, "to_pct": b, "verdict": verdict, "percentile_among_channel": 50,
+                                      "source": "fake", "why": why, "evidence": "fake analysis, not a prediction"}
+    result = {
+        "duration_s": 9.0,
+        "curve": {"pct_of_runtime": grid, "viewers_per_100": curve, "lower": [max(v - 8, 0) for v in curve],
+                  "upper": [v + 8 for v in curve], "band": "80 % of past videos fell inside"},
+        "reference": {"viewers_per_100": curve, "meaning": "typical Short of this length on this channel"},
+        "segments": {"early": seg(10, 25, "typical", ["time until the premise is clear is lower than usual, which helps here"]),
+                     "mid": seg(25, 75, "above", ["The build-up keeps a clear question open until the payoff."]),
+                     "late": seg(75, 95, "below", ["seconds left after the last payoff is higher than usual, which costs viewers here"])},
+        "drop_moments": [{"t_s": 2.0, "reason": "The opening shot holds without a hook."},
+                         {"t_s": 7.0, "reason": "The payoff has passed and nothing new starts."}],
+        "drop_moments_evidence": "fake analysis", "rewatch_level": "medium", "rewatch_evidence": "fake analysis",
+        "advice": ["Cut the first second.", "End right on the payoff."],
+        "similar_past_shorts_used": ["past Short 3", "past Short 11"],
+        "caveats": ["FAKE ANALYSIS: canned numbers for a local test run, not a prediction."],
+        "cost_usd": 0.02, "library_size": 0, "generated_at": _stamp(),
+    }
+    timeline = [{"start_s": float(i), "end_s": float(i + 1), "seen": f"Colt walks through Gem Grab, second {i}",
+                 "heard": "upbeat music"} for i in range(9)]
+    artifacts = {"timeline": timeline, "payoffs": [{"t_s": 6.5, "weight": 3}], "structure": {"arc": "build"},
+                 "embedding": [1.0, 0.0, 0.0], "duration_s": 9.0}
+    return SimpleNamespace(result=result, artifacts=artifacts, cost_usd=0.02)
+
+
+def fake_similar(artifacts: dict, k: int = 5) -> list[dict]:
+    """Canned neighbours in the shape of ``brief.similar_for_draft`` (SO_FAKE_ANALYSIS=1)."""
+    return [{"label": f"past Short {3 + 4 * i}", "similarity": round(0.9 - 0.05 * i, 2), "duration_s": 10.0 + i,
+             "description_untrusted_text": [f"opening: 0-1 s | seen: fake opening {i} | heard: music",
+                                            f"ending: 9-10 s | seen: fake ending {i} | heard: music"],
+             "viewers_per_100": {"at_10_pct": 92, "at_25_pct": 84, "at_50_pct": 71, "at_75_pct": 60, "at_95_pct": 49},
+             "rewatch_level": "medium", "like_rate_tier": "typical",
+             "top_comments_untrusted_text": [{"text": "lol nice one", "likes": 12 - i}, {"text": "part 2 please", "likes": 3}]}
+            for i in range(max(1, min(8, int(k))))]
+
+
+class LineFormatter(logging.Formatter):
+    """Request lines carry their own time; everything else gets one. No tracebacks: only the error's class name."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        text = record.getMessage()
+        if record.name != log.name:
+            text = f"{_stamp()} {record.levelname.lower()} {record.name}: {text}"
+        if record.exc_info and record.exc_info[0] is not None:
+            text += f" [{record.exc_info[0].__name__}]"
+        return text.replace("\n", " ")
+
+
+def go_offline(env=os.environ) -> None:
+    """The embedding model is read from the local cache; the server never contacts the Hugging Face Hub. Must run
+    before the model's libraries are imported, because they read these variables at import."""
+    env.update(OFFLINE_ENV)
+
+
+def _real_warm() -> None:
+    go_offline()
+    from src.tools.predict_retention import tool
+
+    tool.state()
+
+
+def main(argv: list[str] | None = None) -> int:
+    import uvicorn
+
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(LineFormatter())
+    logging.basicConfig(level=logging.WARNING, handlers=[handler])
+    log.setLevel(logging.INFO)
+    go_offline()
+    try:
+        cfg = config.load()
+        opts = load_options(os.environ, cfg)
+        if not opts.fake_analysis:
+            with contextlib.suppress(ImportError):
+                from dotenv import load_dotenv
+
+                load_dotenv(".env")
+            if not os.environ.get("GEMINI_API_KEY_PAID", "").strip():
+                raise StartupError("GEMINI_API_KEY_PAID is not set (environment or .env)")
+        check_binaries()
+    except (StartupError, config.ConfigError) as exc:
+        print(f"cannot start: {exc}", file=sys.stderr)
+        return 2
+    fake = opts.fake_analysis
+    if fake:
+        from src.tools.audience import brief
+
+        log.warning("%s FAKE ANALYSIS is on: results are canned, nothing is sent to Gemini", _stamp())
+    app = build_app(cfg, analyze=fake_analyze if fake else None, warm=None if fake else _real_warm,
+                    similar=fake_similar if fake else None, brief=brief.audience_brief if fake else None,
+                    allow_path_token=opts.allow_path_token, allow_insecure_local=opts.allow_insecure_local)
+    log.info("%s listening on %s:%d public=%s path_token=%s", _stamp(), HOST, opts.port, cfg.PUBLIC_BASE_URL,
+             opts.allow_path_token)
+    uvicorn.run(app, host=HOST, port=opts.port, access_log=False, log_level="warning", server_header=False,
+                proxy_headers=False, timeout_graceful_shutdown=5)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
