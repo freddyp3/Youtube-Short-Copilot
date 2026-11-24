@@ -5,7 +5,7 @@ import json
 import pytest
 
 from src.server import app as A
-from src.server import front, oauth
+from src.server import front
 from test_server_app import ACCEPT, BASE, Env, client_of
 from test_server_oauth import FakeGoogle, bearer, sign_in
 

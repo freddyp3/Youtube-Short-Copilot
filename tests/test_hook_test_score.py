@@ -98,7 +98,6 @@ def score_gate(tmp_path, correct, invalid_ids=(), dropoff=7.0, retention=True):
 
 class TestAggregate:
     def test_mean_median(self, tmp_path):
-        sel = make_selection(4)
         raw_dir = tmp_path / "r"
         raw_dir.mkdir()
         for k, p in [(1, 0.6), (2, 0.8), (3, 0.7)]:

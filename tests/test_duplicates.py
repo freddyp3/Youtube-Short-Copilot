@@ -2,8 +2,6 @@
 
 import json
 
-import pytest
-
 from src.models import pool as pool_mod
 from src.tools.analyze_video import duplicates as D
 

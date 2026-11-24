@@ -1,8 +1,6 @@
 """Tests for schema.py validation (plan section 10)."""
 
-import pytest
-
-from src.evals.hook_test.schema import HookTestResult, validate_result
+from src.evals.hook_test.schema import validate_result
 
 GOOD = {
     "video_description": "gameplay with a hook",

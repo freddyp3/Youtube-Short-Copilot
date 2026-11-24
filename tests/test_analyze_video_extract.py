@@ -2,7 +2,6 @@
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pandas as pd
 
@@ -231,7 +230,7 @@ class TestTrainAll:
         monkeypatch.setattr(extract, "TRAIN_CSV", tmp_path / "ts.csv")
         vids = extract.pick_train_all_videos()
         assert vids["video_id"].tolist() == ["b", "c"]
-        assert "ab30" not in vids["video_id"].tolist() if True else False
+        assert "ab30" not in vids["video_id"].tolist()
 
     def test_gate_heldout_still_impossible(self):
         for s in ("gate", "heldout"):

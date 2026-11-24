@@ -1,7 +1,5 @@
 """Tests for analyze_video's VideoFeatures schema + validate_features (no network)."""
 
-import pytest
-
 from src.tools.analyze_video.schema import (
     VideoFeaturesV3, render_prompt, validate_features, windows)
 

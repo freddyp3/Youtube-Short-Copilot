@@ -1,7 +1,6 @@
 """Tests for gemini_client.py with a fully mocked genai client (no network)."""
 
 import json
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -104,7 +103,7 @@ class TestAnalyze:
         t = GeminiHookTester(client=fake, uploads_path=tmp_path / "u.json",
                              sleep=lambda s: 0)
         t.analyze("vAAA111", blind_file, "the prompt text", 21.0)
-        up_file, up_cfg = fake.files.uploads[0]
+        _up_file, up_cfg = fake.files.uploads[0]
         assert up_cfg.display_name == "vAAA111"  # upload name is the blind id
         contents = fake.models.calls[0]["contents"]
         blob = json.dumps(contents, default=str)
