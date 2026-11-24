@@ -22,7 +22,6 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,10 +37,6 @@ RETRY_DELAY_RE = re.compile(r"retryDelay\"?\s*[:=]\s*\"?(\d+(?:\.\d+)?)s", re.I)
 class DailyQuotaExceeded(Exception):
     """Daily quota hit or 429s past MAX_RETRIES; rerun with --run-id to resume."""
 
-
-@dataclass
-class CallResult:
-    record: dict = field(default_factory=dict)
 
 
 def sha256_file(path: Path) -> str:

@@ -29,13 +29,12 @@ from src.models import targets as T
 from src.models.dataset import load_split
 from src.models.features import M1_COLS, design, prepare
 from src.models.judge import score as S
-from src.models.judge.library import (JUDGE_DIR, K, RAW_DIR, SEED, TIERS, V3_RUNS, Library, curve_points,
+from src.models.judge.library import (JUDGE_DIR, RAW_DIR, SEED, TIERS, V3_RUNS, Library, curve_points,
                                       embed_timelines, implied_points, load_timelines, tiers)
 from src.models.judge.prompt import build_prompt
 
 log = logging.getLogger("gate")
 RUNS = {"gate": "20261113T000000Z_gate_v3", "heldout": "20261113T000000Z_heldout_v3"}
-GATE_RUN = RUNS["gate"]
 ITEMS = ("early_hold", "mid_hold", "late_hold", "replay_level")
 GEMINI = {"Gemini, no examples": "j1_L0_E_3.8-flash", "Gemini, examples >= 0.75": "j1_L2_T75_3.8-flash",
           "Gemini, 5 similar": "j1_L2_E_3.8-flash"}

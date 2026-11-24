@@ -42,7 +42,7 @@ from src.models.experiments import all_recipes
 from src.models.features import M1_COLS, design, prepare
 from src.models.judge import score as S, simulator as M
 from src.models.judge.gate import RUNS
-from src.models.judge.library import (JUDGE_DIR, SEED, TIERS, V3_RUNS, Library, build_from, embed_timelines,
+from src.models.judge.library import (JUDGE_DIR, SEED, V3_RUNS, Library, build_from, embed_timelines,
                                       load_timelines, oof_folds, rf_late_oof, timeline_lines, chunked_embeddings, ENCODER)
 from src.models.judge.run import judge_one
 from src.tools.analyze_video.ab_score import ARC_ORD

@@ -38,12 +38,11 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 from src.models import cv
 from src.models.dataset import load_split
-from src.models.features import BASELINES, CODE_COLS, M1_COLS, Data, Recipe, onehot_cols, prepare, registered_recipes
+from src.models.features import BASELINES, M1_COLS, Data, Recipe, onehot_cols, prepare, registered_recipes
 
 OUT_DIR = Path("data/models/experiments")
 LOG = OUT_DIR / "log.jsonl"

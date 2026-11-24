@@ -44,7 +44,6 @@ CONTINUOUS = ["payoff_count", "payoff_count_all", "dead_time_s", "tail_all", "ta
 KIND = {**{f: "kappa" for f in NOMINAL + BOOLS}, **{f: "wkappa" for f in ORDINAL_LEVELS},
         **{f: "ts" for f in TIMESTAMPS}, **{f: "icc" for f in CONTINUOUS}}
 # core features (03b 4.2); "tail" and the main-payoff timestamp resolve to a variant (raw + tail_all for step 2)
-CORE = ["t_premise_clear_s", "payoff_count", "t_main_payoff_s", "tail", "dead_time_s", "arc_ord", "loop_seam"]
 SUBSTITUTES = {"dead_time_s": "static_frac (G4)", "loop_seam": "first_last_dhash_dist (G6)"}
 NO_CHANGE = re.compile(r"^\s*no change\.?\s*$", re.I)
 

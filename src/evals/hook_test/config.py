@@ -74,7 +74,6 @@ UPLOADS_JSON = OUT_DIR / "uploads.json"
 DEV_LOG = OUT_DIR / "dev_log.jsonl"
 SELECTION_CSV_PATH = OUT_DIR / "selection.csv"
 SELECTION_JSON_PATH = OUT_DIR / "selection.json"
-VIDEO_MAP_PATH = OUT_DIR / "video_map.csv"
 
 # Gate thresholds (section 7 / 12)
 GATE_N, GATE_PASS = 40, 26

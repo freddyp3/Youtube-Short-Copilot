@@ -13,7 +13,7 @@ from typing import Literal
 import numpy as np
 from pydantic import BaseModel, ValidationError
 
-from src.models.judge.library import C_COLS, CHECKPOINTS, Library, timeline_lines
+from src.models.judge.library import CHECKPOINTS, Library, timeline_lines
 
 # j1: the ladder prompt. j2 (revision round 1, plan/03c 20.4 C3): explicit verdict on the opening before the numbers.
 PROMPT_VERSION = os.environ.get("JUDGE_PROMPT_VERSION", "j1")

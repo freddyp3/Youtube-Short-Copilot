@@ -122,9 +122,6 @@ def build(df: pd.DataFrame, retention: pd.DataFrame, payoffs: dict[str, list[dic
                     len(df), per.pop())
 
 
-TIMELINE_COVARIATES = ("no_change", "since_change_s")
-
-
 def timeline_covariates(df: pd.DataFrame, timelines: dict[str, list[dict]], seg: "Segments") -> np.ndarray:
     """Two extra covariates from the one-second timeline (plan/03c section 20.3): nothing new is seen in the second
     the segment starts in, and seconds since something new was last seen (capped). Rows in ``seg`` order."""

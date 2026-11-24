@@ -16,7 +16,6 @@ import argparse
 import json
 import logging
 import math
-import random
 from pathlib import Path
 
 import numpy as np
@@ -437,7 +436,7 @@ def render_report(s: dict) -> str:
 
 
 def append_dev_log(scores: dict) -> None:
-    A, B, st = scores["criterion_A"], scores["criterion_B"], scores["stability"]
+    A, B = scores["criterion_A"], scores["criterion_B"]
     rec = {
         "run_id": scores["run_id"],
         "schema_version": scores.get("schema_version"),

@@ -11,7 +11,7 @@ import socket
 import ssl
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar
@@ -254,15 +254,3 @@ class ApiCaller:
             self.raw.save(raw_name, response)
         return response
 
-
-def paginate_tokens(fetch_page: Callable[[str | None, int], dict[str, Any]]) -> Iterable[dict[str, Any]]:
-    """Yield pages from a pageToken-style list call until ``nextPageToken`` runs out."""
-    token: str | None = None
-    page = 0
-    while True:
-        page += 1
-        response = fetch_page(token, page)
-        yield response
-        token = response.get("nextPageToken")
-        if not token:
-            return

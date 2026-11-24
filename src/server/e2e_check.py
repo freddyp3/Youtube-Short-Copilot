@@ -33,7 +33,6 @@ import secrets
 import shutil
 import sqlite3
 import subprocess
-import sys
 import time
 from html.parser import HTMLParser
 from pathlib import Path

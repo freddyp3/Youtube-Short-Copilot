@@ -19,7 +19,6 @@ carry, in the place of the token id of an invite token.
 from __future__ import annotations
 
 import hashlib
-import json
 import secrets
 import time
 from collections.abc import Callable

@@ -30,7 +30,6 @@ from pathlib import Path
 from src.server import config
 
 WAITING, PROCESSING, DONE, FAILED, EXPIRED = "waiting_for_upload", "processing", "done", "failed", "expired"
-STATUSES = (WAITING, PROCESSING, DONE, FAILED, EXPIRED)
 PAID_BY = ("server", "own_key")
 JOB_STALE_S = 3600
 MAX_STEP_CHARS, MAX_CODE_CHARS, MAX_MESSAGE_CHARS = 40, 40, 500
