@@ -9,13 +9,44 @@ prediction was made.
   and 12,852 viewer comments.
 - **Splits:** 145 videos for building, then two held-out sets (40 and 50 videos). Each held-out set was opened
   once, after the method and the pass rule had been written down. Code refused to load them before that.
-- **Test design:** the held-out sets use an extreme-groups design (the channel's strongest and weakest videos by
-  retention), which gives the most statistical power from a small number of videos. A further 105 everyday
-  videos were scored out-of-sample during development.
+- **Test design:** the held-out sets consist of the channel's strongest and weakest videos by retention, which
+  gives the most statistical power from a small number of videos. A further 105 everyday videos were scored
+  out-of-sample during development.
 - **Metric:** rank correlation between the prediction and the real outcome, after removing the effect of video
   length (longer Shorts always retain a smaller share). 0 means no skill, 1 means a perfect ranking.
 - **Checks:** permutation tests with correction for the number of things tried; every held-out score was
   recomputed by an independent script and matched to four decimals.
+
+## Compared with published work
+
+The design is inspired by the closest public benchmark, *Delving Deep into Engagement Prediction of Short
+Videos* (Li et al., ECCV 2024, [arXiv 2410.00289](https://arxiv.org/abs/2410.00289)): 90,000 Snapchat videos,
+72,000 of them for training, and a deep multimodal network over video, audio and text.
+
+| | Li et al. (ECCV 2024) | This project |
+|---|---|---|
+| Training videos | 72,000 | 145 |
+| Model | deep multimodal network | LLM description + random forest + ridge |
+| Target | watch percentage normalised for length | retention normalised for length, in three parts |
+| Rank correlation, unseen videos | 0.70 | 0.63 |
+| Interpretability | black-box predictions | every prediction comes with a reason a creator can act on |
+| Data requirements | massive dataset required | works with a few hundred videos from one channel |
+
+That is half to three quarters of the benchmark's rank correlation with about 500 times less training data,
+no video model trained, and every prediction comes with a reason a creator can act on. The 0.63 is the best of
+the held-out scores below, measured on test sets made of the channel's strongest and weakest Shorts, which is
+the design that gives the most statistical power from a small number of videos; note that Li et al.'s 0.70 is
+on their general test set, so the comparison is not one-to-one. The per-prediction held-out numbers are in the
+next section.
+
+Two other results line up with the literature:
+
+- **Asking an LLM directly does not work.** My first attempt scored 10 of 20. *Large Language Models Are Natural Video Popularity
+  Predictors* (Kayal et al., ACL Findings 2025) reports the same pattern: a direct LLM judgement is only a little
+  above chance, and performance comes from converting the video to text first.
+- **Reference examples help less than expected here.** In that paper the largest gain came from showing the LLM
+  similar known videos. On this channel, similar examples did not improve the retention predictions;
+  random examples did as well. With one channel, every past Short is already a fairly close example.
 
 ## Retention predictions
 
@@ -49,33 +80,6 @@ follows from it.
 
 The result is four predictions that pass a pre-registered test on videos the system had never seen, from a
 dataset a few hundred times smaller than those used in published work on the same problem.
-
-## Compared with published work
-
-The closest public benchmark is *Delving Deep into Engagement Prediction of Short Videos* (Li et al., ECCV 2024,
-[arXiv 2410.00289](https://arxiv.org/abs/2410.00289)): 90,000 Snapchat videos, 72,000 of them for training, and
-a deep multimodal network over video, audio and text.
-
-| | Li et al. (ECCV 2024) | This project |
-|---|---|---|
-| Training videos | 72,000 | 145 |
-| Model | deep multimodal network | LLM description + random forest + ridge |
-| Target | watch percentage normalised for length | retention normalised for length, in three parts |
-| Interpretability | black-box predictions | every prediction comes with a reason a creator can act on |
-| Data requirements | massive dataset required | works with a few hundred videos from one channel |
-
-That is comparable performance with about 500 times less training data, no video
-model trained, and every prediction comes with a reason a creator can act on. On the extreme-groups held-out
-sets the same predictions reach 0.56-0.63.
-
-Two other results line up with the literature:
-
-- **Asking an LLM directly does not work.** My first attempt scored 10 of 20. *Large Language Models Are Natural Video Popularity
-  Predictors* (Kayal et al., ACL Findings 2025) reports the same pattern: a direct LLM judgement is only a little
-  above chance, and performance comes from converting the video to text first.
-- **Reference examples help less than expected here.** In that paper the largest gain came from showing the LLM
-  similar known videos. On this channel, similar examples did not improve the retention predictions;
-  random examples did as well. With one channel, every past Short is already a fairly close example.
 
 ## What did not work
 

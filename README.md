@@ -18,6 +18,8 @@ Channel stats:
 - 37.7K subscribers
 - 1.8M likes
 
+Used by creators in communities I'm active in, like the [Official Supercell Creators Discord](https://creators.supercell.com/en), the [Shorts Hub Community](https://discord.com/servers/shorts-hub--community-1049580108228337684), and [r/SmallYoutubers](https://www.reddit.com/r/SmallYoutubers/).
+
 ## How it works
 
 ![Architecture: the creator asks Claude, Claude calls the MCP server, features are extracted by Gemini and code, then retention prediction and audience reaction return to Claude, which writes the publish plan](docs/architecture.png)
