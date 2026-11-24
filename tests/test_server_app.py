@@ -174,7 +174,7 @@ def test_only_post_is_served_on_the_mcp_route(env):
 def test_initialize_and_tools_list(env):
     with client_of(env) as c:
         init = env.rpc(c, "initialize", INIT).json()["result"]
-        assert init["serverInfo"]["name"] == "shorts-pre-publish-copilot" and "tools" in init["capabilities"]
+        assert init["serverInfo"]["name"] == "youtube-short-copilot" and "tools" in init["capabilities"]
         text = init["instructions"]
         assert text == A.INSTRUCTIONS
         assert "takes about 3 minutes" in text and "1-2 minutes" not in text + tools.MSG_PROCESSING

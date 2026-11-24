@@ -37,7 +37,7 @@ TUNNEL_ID="$(python3 -c 'import json; print(json.load(open("/etc/so/tunnel.json"
 
 cat > /etc/systemd/system/so-front.service <<UNIT
 [Unit]
-Description=Shorts Pre-Publish Copilot front (sign-in, users, MCP)
+Description=YouTube Short Copilot front (sign-in, users, MCP)
 After=network-online.target
 Wants=network-online.target
 

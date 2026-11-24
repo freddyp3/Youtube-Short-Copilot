@@ -22,7 +22,7 @@ from collections.abc import Callable
 USER_HEADER = "x-so-user"
 USER_ID = re.compile(r"(u_)?[0-9a-f]{8}")
 TIMEOUT_S = 150.0
-MSG_OFFLINE = ("Shorts Pre-Publish Copilot is offline at the moment, so a draft cannot be checked right now. Nothing is "
+MSG_OFFLINE = ("YouTube Short Copilot is offline at the moment, so a draft cannot be checked right now. Nothing is "
                "wrong with the user's access. Tell the user this plainly and suggest trying again later; do not retry "
                "in a loop.")
 ACCEPT = "application/json, text/event-stream"

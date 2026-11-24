@@ -99,7 +99,7 @@ SECURITY_HEADERS = {
     "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "Cache-Control": "no-store",
 }
 
-INSTRUCTIONS = """Shorts Pre-Publish Copilot checks a draft YouTube Short before it is posted. It was built on one \
+INSTRUCTIONS = """YouTube Short Copilot checks a draft YouTube Short before it is posted. It was built on one \
 Brawl Stars channel: every prediction is relative to that channel's audience and its past Shorts of the same length. \
 It is not a general forecast and does not predict views.
 
@@ -576,7 +576,7 @@ def build_mcp(state: AppState) -> Server:
     base = state.cfg.PUBLIC_BASE_URL
     icons = [types.Icon(src=f"{base}/icon.png", mime_type="image/png", sizes=["512x512"]),
              types.Icon(src=f"{base}/icon.svg", mime_type="image/svg+xml", sizes=["any"])]
-    return Server("shorts-pre-publish-copilot", version="0.1.0", title="Shorts Pre-Publish Copilot", icons=icons,
+    return Server("youtube-short-copilot", version="0.1.0", title="YouTube Short Copilot", icons=icons,
                   instructions=INSTRUCTIONS, on_list_tools=list_tools, on_call_tool=call_tool)
 
 
@@ -901,8 +901,8 @@ def upload_routes(state: AppState) -> list[Route]:
 
 MSG_SIGN_IN_GONE = "This sign-in has expired or was already used. Go back to the chat and connect again."
 MSG_GOOGLE_FAILED = "Google could not confirm your account. Go back to the chat and connect again."
-MSG_BLOCKED = "This account cannot use Shorts Pre-Publish Copilot."
-MSG_WAITING = ("Your request is in. You can use Shorts Pre-Publish Copilot once it has been approved; then go back "
+MSG_BLOCKED = "This account cannot use YouTube Short Copilot."
+MSG_WAITING = ("Your request is in. You can use YouTube Short Copilot once it has been approved; then go back "
                "to the chat and connect again.")
 MAX_CONSENT_BODY = 4096
 
@@ -975,7 +975,7 @@ def sign_in_routes(state: AppState) -> list[Route]:
                  f'<input type="hidden" name="ticket" value="{html.escape(ticket)}">'
                  '<button class="quiet" name="choice" value="deny">Cancel</button>'
                  '<button class="go" name="choice" value="allow">Allow</button></form>')
-        return sign_in_page(200, "Connect Shorts Pre-Publish Copilot?", inner,
+        return sign_in_page(200, "Connect YouTube Short Copilot?", inner,
                             form_origin=f"{target.scheme}://{target.netloc}" if target.netloc else f"{target.scheme}:")
 
     async def consent(request: Request) -> Response:
@@ -1019,7 +1019,7 @@ def oauth_routes(state: AppState) -> list[Route]:
     sdk = create_auth_routes(state.oauth, issuer_url=issuer, client_registration_options=ClientRegistrationOptions(enabled=True),
                              revocation_options=RevocationOptions(enabled=True))
     sdk += create_protected_resource_routes(resource_url=AnyHttpUrl(f"{base}/mcp"), authorization_servers=[issuer],
-                                            resource_name="Shorts Pre-Publish Copilot")
+                                            resource_name="YouTube Short Copilot")
     for route in sdk:
         route.app = _Labelled(route.app)
     return [*sdk, *sign_in_routes(state)]
@@ -1048,10 +1048,10 @@ def icon_routes() -> list[Route]:
         info: RequestInfo = request.scope["so"]
         info.route, info.outcome = "/", "home"
         body = ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
-                '<meta name="viewport" content="width=device-width,initial-scale=1"><title>Shorts Pre-Publish Copilot</title>'
+                '<meta name="viewport" content="width=device-width,initial-scale=1"><title>YouTube Short Copilot</title>'
                 '<link rel="icon" href="/favicon.ico" sizes="any"><link rel="icon" href="/icon.svg" type="image/svg+xml">'
                 '<link rel="apple-touch-icon" href="/apple-touch-icon.png">'
-                f'<style>{STYLE}</style></head><body><main class="card"><h1>Shorts Pre-Publish Copilot</h1>'
+                f'<style>{STYLE}</style></head><body><main class="card"><h1>YouTube Short Copilot</h1>'
                 '<p class="note">A connector for Claude that checks a draft YouTube Short before you post it. '
                 'Add it in Claude under Connectors to use it.</p></main></body></html>')
         headers = {**SECURITY_HEADERS, "Cache-Control": "public, max-age=3600"}
